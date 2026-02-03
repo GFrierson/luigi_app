@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from src.agent import build_messages, generate_response, SYSTEM_PROMPT
+from src.agent import build_messages, generate_response, SYSTEM_PROMPT, prepare_conversation_history
 from src.config import Settings
 
 @pytest.fixture
@@ -18,6 +18,27 @@ def mock_settings():
         DATABASE_PATH="test.db",
         LOG_LEVEL="INFO"
     )
+
+def test_prepare_conversation_history():
+    """Test that prepare_conversation_history limits to at most 5 messages."""
+    # Create 10 message history
+    history = [
+        {"direction": "inbound", "body": f"Message {i}", "timestamp": "2024-01-01 10:00:00"}
+        for i in range(10)
+    ]
+    
+    filtered = prepare_conversation_history(history)
+    assert len(filtered) == 5
+    # Should take the last 5 messages
+    assert filtered[0]["body"] == "Message 5"
+    assert filtered[-1]["body"] == "Message 9"
+    
+    # Test with fewer than 5 messages
+    short_history = history[:3]
+    filtered = prepare_conversation_history(short_history)
+    assert len(filtered) == 3
+    assert filtered[0]["body"] == "Message 0"
+    assert filtered[-1]["body"] == "Message 2"
 
 def test_build_messages_includes_system_prompt():
     """Test that build_messages includes the system prompt."""
@@ -38,7 +59,7 @@ def test_build_messages_maps_directions_correctly():
     
     messages = build_messages(conversation_history)
     
-    # Should have system prompt + 3 conversation messages
+    # Should have system prompt + 3 conversation messages (all 3 are <=5)
     assert len(messages) == 4
     
     # Check role mapping
@@ -50,6 +71,23 @@ def test_build_messages_maps_directions_correctly():
     
     assert messages[3]["role"] == "user"  # inbound -> user
     assert messages[3]["content"] == "How are you?"
+
+def test_build_messages_limits_to_5_messages():
+    """Test that build_messages limits to at most 5 conversation messages."""
+    # Create 7 messages
+    conversation_history = [
+        {"direction": "inbound", "body": f"Message {i}", "timestamp": "2024-01-01 10:00:00"}
+        for i in range(7)
+    ]
+    
+    messages = build_messages(conversation_history)
+    
+    # Should have system prompt + 5 messages (last 5 of 7)
+    assert len(messages) == 6  # 1 system + 5 user messages
+    
+    # The messages should be from Message 2 to Message 6
+    assert messages[1]["content"] == "Message 2"
+    assert messages[5]["content"] == "Message 6"
 
 def test_build_messages_handles_unknown_direction(caplog):
     """Test that build_messages handles unknown direction with warning."""

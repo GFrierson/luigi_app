@@ -11,6 +11,26 @@ You help Shanelle track her symptoms, medications, and general wellbeing.
 Ask clarifying questions when uncertain.
 Keep responses brief—this is SMS, not email."""
 
+def prepare_conversation_history(conversation_history: List[Dict]) -> List[Dict]:
+    """
+    Prepare conversation history according to ADR decision:
+    Feed the LLM the lesser of:
+    - Last 24 hours of messages, OR
+    - Last 5 messages
+    
+    Since conversation_history is already filtered by time window (24 hours)
+    when retrieved from the database, we just need to take up to last 5 messages.
+    
+    Args:
+        conversation_history: List of message dicts from database
+    Returns:
+        Filtered list of up to 5 messages
+    """
+    # Take up to the last 5 messages
+    filtered_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
+    logger.debug(f"Prepared {len(filtered_history)} messages from {len(conversation_history)} available")
+    return filtered_history
+
 def build_messages(conversation_history: List[Dict]) -> List[Dict]:
     """
     Convert conversation history into OpenAI message format.
@@ -21,9 +41,12 @@ def build_messages(conversation_history: List[Dict]) -> List[Dict]:
     Returns:
         List of message dicts in OpenAI format with 'role' and 'content'
     """
+    # First, prepare the history according to ADR rules
+    prepared_history = prepare_conversation_history(conversation_history)
+    
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    for message in conversation_history:
+    for message in prepared_history:
         if message['direction'] == 'inbound':
             role = 'user'
         elif message['direction'] == 'outbound':
