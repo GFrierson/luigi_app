@@ -73,7 +73,7 @@ async def send_scheduled_message(message_template: str) -> None:
         
     except Exception as e:
         logger.error(f"Failed to send scheduled message: {message_template[:50]}...", exc_info=True)
-        # Try to send a fallback message
+        # Try to send a fallback message as per ADR
         try:
             fallback_text = "This is your health assistant. I tried to send a scheduled check-in but encountered a technical issue. I'll try again later."
             fallback_sid = await asyncio.to_thread(send_sms, fallback_text)
