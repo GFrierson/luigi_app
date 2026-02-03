@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict
 from openai import OpenAI
-from src.config import Settings, get_settings
+from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 

@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional
+from typing import Dict
 from twilio.rest import Client as TwilioClient
 from src.config import Settings, get_settings
 
