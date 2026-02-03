@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 from src.sms import get_twilio_client, send_sms, parse_inbound_sms
 from src.config import Settings
+from twilio.rest import Client
 
 @pytest.fixture
 def mock_settings():

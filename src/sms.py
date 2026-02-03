@@ -1,11 +1,11 @@
 import logging
 from typing import Dict
-from twilio.rest import Client as TwilioClient
+from twilio.rest import Client
 from src.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
-def get_twilio_client(config: Settings) -> TwilioClient:
+def get_twilio_client(config: Settings) -> Client:
     """
     Create and return a Twilio client instance.
     
@@ -15,7 +15,7 @@ def get_twilio_client(config: Settings) -> TwilioClient:
     Returns:
         Twilio client instance
     """
-    return TwilioClient(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN)
+    return Client(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN)
 
 def send_sms(body: str) -> str:
     """
