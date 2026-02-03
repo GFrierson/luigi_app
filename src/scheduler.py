@@ -53,17 +53,6 @@ def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
     
     logger.info(f"Total scheduled check-ins: {len(schedules)}")
 
-import asyncio
-import logging
-from zoneinfo import ZoneInfo
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from src.config import get_settings
-from src.database import get_active_schedules, insert_message
-from src.sms import send_sms
-
-logger = logging.getLogger(__name__)
-
 async def send_scheduled_message(message_template: str) -> None:
     """
     Send a scheduled SMS message and log it to the database.
