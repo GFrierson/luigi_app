@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -52,6 +53,17 @@ def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
     
     logger.info(f"Total scheduled check-ins: {len(schedules)}")
 
+import asyncio
+import logging
+from zoneinfo import ZoneInfo
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from src.config import get_settings
+from src.database import get_active_schedules, insert_message
+from src.sms import send_sms
+
+logger = logging.getLogger(__name__)
+
 async def send_scheduled_message(message_template: str) -> None:
     """
     Send a scheduled SMS message and log it to the database.
@@ -62,13 +74,21 @@ async def send_scheduled_message(message_template: str) -> None:
     config = get_settings()
     
     try:
-        # Send the SMS
-        sid = send_sms(message_template)
+        # Send the SMS in a thread to avoid blocking the event loop
+        sid = await asyncio.to_thread(send_sms, message_template)
         
         # Log to database
-        insert_message(config.DATABASE_PATH, 'outbound', message_template, sid)
+        await asyncio.to_thread(insert_message, config.DATABASE_PATH, 'outbound', message_template, sid)
         
         logger.info(f"Sent scheduled message with SID: {sid}")
         
     except Exception as e:
         logger.error(f"Failed to send scheduled message: {message_template[:50]}...", exc_info=True)
+        # Try to send a fallback message
+        try:
+            fallback_text = "This is your health assistant. I tried to send a scheduled check-in but encountered a technical issue. I'll try again later."
+            fallback_sid = await asyncio.to_thread(send_sms, fallback_text)
+            await asyncio.to_thread(insert_message, config.DATABASE_PATH, 'outbound', fallback_text, fallback_sid)
+            logger.info(f"Sent fallback message with SID: {fallback_sid}")
+        except Exception as fallback_e:
+            logger.error(f"Failed to send fallback message: {fallback_e}", exc_info=True)
