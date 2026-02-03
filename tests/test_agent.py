@@ -78,12 +78,13 @@ def test_generate_response_returns_llm_content(mock_settings):
     mock_choice.message = mock_message
     mock_response.choices = [mock_choice]
     
-    with patch('src.agent.OpenAI') as mock_openai_class:
+    with patch('src.agent.OpenAI') as mock_openai_class, \
+         patch('src.agent.get_settings', return_value=mock_settings):
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_class.return_value = mock_client
         
-        response = generate_response(mock_settings, conversation_history)
+        response = generate_response(conversation_history)
         
         # Verify the response
         assert response == "Hello! How can I help you today?"
@@ -105,12 +106,13 @@ def test_generate_response_returns_fallback_on_api_error(mock_settings):
         {"direction": "inbound", "body": "Hello", "timestamp": "2024-01-01 10:00:00"},
     ]
     
-    with patch('src.agent.OpenAI') as mock_openai_class:
+    with patch('src.agent.OpenAI') as mock_openai_class, \
+         patch('src.agent.get_settings', return_value=mock_settings):
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = Exception("API Error")
         mock_openai_class.return_value = mock_client
         
-        response = generate_response(mock_settings, conversation_history)
+        response = generate_response(conversation_history)
         
         # Should return fallback message
         assert response == "The LLM call is failing, I'll try again soon."
@@ -129,12 +131,13 @@ def test_generate_response_handles_empty_response(mock_settings):
     mock_choice.message = mock_message
     mock_response.choices = [mock_choice]
     
-    with patch('src.agent.OpenAI') as mock_openai_class:
+    with patch('src.agent.OpenAI') as mock_openai_class, \
+         patch('src.agent.get_settings', return_value=mock_settings):
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_class.return_value = mock_client
         
-        response = generate_response(mock_settings, conversation_history)
+        response = generate_response(conversation_history)
         
         # Should return fallback for empty response
         assert response == "I'm sorry, I didn't get a response. Could you try again?"
@@ -145,13 +148,14 @@ def test_generate_response_logs_error_on_failure(mock_settings, caplog):
         {"direction": "inbound", "body": "Hello", "timestamp": "2024-01-01 10:00:00"},
     ]
     
-    with patch('src.agent.OpenAI') as mock_openai_class:
+    with patch('src.agent.OpenAI') as mock_openai_class, \
+         patch('src.agent.get_settings', return_value=mock_settings):
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = Exception("Test error")
         mock_openai_class.return_value = mock_client
         
         with caplog.at_level("ERROR"):
-            response = generate_response(mock_settings, conversation_history)
+            response = generate_response(conversation_history)
         
         # Should log the error
         assert "LLM API call failed" in caplog.text

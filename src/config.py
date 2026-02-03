@@ -61,5 +61,11 @@ class Settings:
         logger.info("Configuration loaded successfully")
         return settings
 
-# Create a global settings instance
-settings = Settings.load()
+_settings_instance = None
+
+def get_settings() -> Settings:
+    """Get the global settings instance, loading it if necessary."""
+    global _settings_instance
+    if _settings_instance is None:
+        _settings_instance = Settings.load()
+    return _settings_instance

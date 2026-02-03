@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict
 from openai import OpenAI
-from src.config import Settings
+from src.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +40,17 @@ def build_messages(conversation_history: List[Dict]) -> List[Dict]:
     logger.debug(f"Built {len(messages)} messages for LLM")
     return messages
 
-def generate_response(config: Settings, conversation_history: List[Dict]) -> str:
+def generate_response(conversation_history: List[Dict]) -> str:
     """
     Generate a response using the LLM.
     
     Args:
-        config: Application settings
         conversation_history: Recent conversation history
         
     Returns:
         LLM response string or fallback message on error
     """
+    config = get_settings()
     try:
         # Initialize OpenAI client with OpenRouter configuration
         client = OpenAI(
