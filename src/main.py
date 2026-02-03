@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, Response
@@ -88,8 +89,8 @@ async def inbound_sms(
         # 3. Generate response using LLM
         response_text = generate_response(history)
         
-        # 4. Send response SMS
-        sid = send_sms(response_text)
+        # 4. Send response SMS (non-blocking)
+        sid = await asyncio.to_thread(send_sms, response_text)
         
         # 5. Store outbound message
         insert_message(config.DATABASE_PATH, 'outbound', response_text, sid)
