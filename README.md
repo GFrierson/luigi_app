@@ -1,6 +1,6 @@
 # Health Tracker v1 - Luigi
 
-A conversational SMS-based health tracker for chronic illness management. This system allows a user (Shanelle) to log symptoms, medications, and general wellbeing through natural conversation via SMS.
+A conversational SMS-based health tracker for chronic illness management. This system allows a user to log symptoms, medications, and general wellbeing through natural conversation via SMS.
 
 ## Overview
 
