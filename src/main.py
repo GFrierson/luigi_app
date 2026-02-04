@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Form, Response
+from fastapi import FastAPI, Form, Response, Request
 from src.config import get_settings
 from src.database import init_db, seed_default_schedules, insert_message, get_recent_messages, deactivate_all_schedules
 from src.scheduler import create_scheduler, schedule_check_ins
@@ -58,28 +58,33 @@ async def health_check() -> dict:
     }
 
 @app.post("/webhook/sms")
-async def inbound_sms(
-    Body: str = Form(...),
-    From: str = Form(...),
-    MessageSid: str = Form(...)
-) -> Response:
+async def inbound_sms(request: Request) -> Response:
     """
     Handle inbound SMS from Twilio webhook.
     
-    Args:
-        Body: SMS message content
-        From: Sender phone number
-        MessageSid: Twilio message SID
-        
     Returns:
         Empty TwiML response
     """
     config = get_settings()
     
-    # Log receipt
-    logger.info(f"Received inbound SMS from {From}: {Body}")
-    
     try:
+        # Get form data
+        form_data = await request.form()
+        logger.info(f"Received form data keys: {list(form_data.keys())}")
+        
+        # Extract fields
+        Body = form_data.get("Body")
+        From = form_data.get("From")
+        MessageSid = form_data.get("MessageSid")
+        
+        if not Body or not From or not MessageSid:
+            logger.error(f"Missing required fields. Body: {Body}, From: {From}, MessageSid: {MessageSid}")
+            # Still return empty TwiML response
+            return Response(content="<Response></Response>", media_type="application/xml")
+        
+        # Log receipt
+        logger.info(f"Received inbound SMS from {From}: {Body}")
+        
         # 1. Store inbound message
         insert_message(config.DATABASE_PATH, 'inbound', Body, MessageSid)
         
