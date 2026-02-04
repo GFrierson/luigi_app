@@ -1,4 +1,5 @@
 import asyncio
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, Response, Request
@@ -6,7 +7,7 @@ from src.config import get_settings
 from src.database import init_db, seed_default_schedules, insert_message, get_recent_messages, deactivate_all_schedules
 from src.scheduler import create_scheduler, schedule_check_ins
 from src.agent import generate_response
-from src.sms import send_sms
+from src.sms import send_sms, parse_inbound_sms
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,16 @@ async def health_check() -> dict:
         "agent": "Luigi"
     }
 
+@app.post("/test/webhook")
+async def test_webhook(request: Request):
+    """Test endpoint to see what data Twilio sends."""
+    form_data = await request.form()
+    return {
+        "headers": dict(request.headers),
+        "form_data": dict(form_data),
+        "body": await request.body()
+    }
+
 @app.post("/webhook/sms")
 async def inbound_sms(request: Request) -> Response:
     """
@@ -71,11 +82,13 @@ async def inbound_sms(request: Request) -> Response:
         # Get form data
         form_data = await request.form()
         logger.info(f"Received form data keys: {list(form_data.keys())}")
+        logger.info(f"Received form data values: {dict(form_data)}")
         
-        # Extract fields
-        Body = form_data.get("Body")
-        From = form_data.get("From")
-        MessageSid = form_data.get("MessageSid")
+        # Extract fields using parse_inbound_sms for consistency
+        parsed_data = parse_inbound_sms(dict(form_data))
+        Body = parsed_data['body']
+        From = parsed_data['from_number']
+        MessageSid = parsed_data['twilio_sid']
         
         if not Body or not From or not MessageSid:
             logger.error(f"Missing required fields. Body: {Body}, From: {From}, MessageSid: {MessageSid}")
