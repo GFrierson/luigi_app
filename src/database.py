@@ -129,6 +129,21 @@ def get_active_schedules(db_path: str) -> list[dict]:
     logger.debug(f"Retrieved {len(schedules)} active schedules")
     return schedules
 
+def deactivate_all_schedules(db_path: str) -> None:
+    """Deactivate all schedules in the database."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        UPDATE schedules 
+        SET active = FALSE
+        WHERE active = TRUE
+    """)
+    
+    conn.commit()
+    conn.close()
+    logger.info("Deactivated all schedules")
+
 def seed_default_schedules(db_path: str) -> None:
     """Insert default schedules if the schedules table is empty."""
     conn = get_connection(db_path)

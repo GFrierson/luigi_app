@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, Response
 from src.config import get_settings
-from src.database import init_db, seed_default_schedules, insert_message, get_recent_messages
+from src.database import init_db, seed_default_schedules, insert_message, get_recent_messages, deactivate_all_schedules
 from src.scheduler import create_scheduler, schedule_check_ins
 from src.agent import generate_response
 from src.sms import send_sms
@@ -83,19 +83,40 @@ async def inbound_sms(
         # 1. Store inbound message
         insert_message(config.DATABASE_PATH, 'inbound', Body, MessageSid)
         
-        # 2. Get conversation history
-        history = get_recent_messages(config.DATABASE_PATH, limit=5, hours=24)
-        
-        # 3. Generate response using LLM
-        response_text = generate_response(history)
-        
-        # 4. Send response SMS (non-blocking)
-        sid = await asyncio.to_thread(send_sms, response_text)
-        
-        # 5. Store outbound message
-        insert_message(config.DATABASE_PATH, 'outbound', response_text, sid)
-        
-        logger.info(f"Sent response with SID: {sid}")
+        # Check if the message is "Stop" (case-insensitive)
+        if Body.strip().lower() == "stop":
+            # Deactivate all schedules in the database
+            await asyncio.to_thread(deactivate_all_schedules, config.DATABASE_PATH)
+            
+            # Remove all jobs from the scheduler
+            global _scheduler
+            if _scheduler:
+                _scheduler.remove_all_jobs()
+                logger.info("Removed all jobs from scheduler")
+            
+            # Send confirmation message
+            stop_response = "All scheduled check-ins have been stopped. You can restart them by restarting the application."
+            sid = await asyncio.to_thread(send_sms, stop_response)
+            
+            # Store the outbound message
+            insert_message(config.DATABASE_PATH, 'outbound', stop_response, sid)
+            
+            logger.info(f"User requested to stop schedules. Sent confirmation with SID: {sid}")
+            
+        else:
+            # 2. Get conversation history
+            history = get_recent_messages(config.DATABASE_PATH, limit=5, hours=24)
+            
+            # 3. Generate response using LLM
+            response_text = generate_response(history)
+            
+            # 4. Send response SMS (non-blocking)
+            sid = await asyncio.to_thread(send_sms, response_text)
+            
+            # 5. Store outbound message
+            insert_message(config.DATABASE_PATH, 'outbound', response_text, sid)
+            
+            logger.info(f"Sent response with SID: {sid}")
         
     except Exception as e:
         logger.error(f"Error processing inbound SMS: {e}", exc_info=True)
