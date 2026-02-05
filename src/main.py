@@ -118,9 +118,9 @@ async def inbound_sms(request: Request) -> Response:
                 _scheduler.remove_all_jobs()
                 logger.info("Removed all jobs from scheduler")
             
-            # Send confirmation message
+            # Send confirmation message to the sender
             stop_response = "All scheduled check-ins have been stopped. You can restart them by restarting the application."
-            sid = await asyncio.to_thread(send_sms, stop_response)
+            sid = await asyncio.to_thread(send_sms, stop_response, From)
             
             # Store the outbound message
             insert_message(config.DATABASE_PATH, 'outbound', stop_response, sid)
@@ -134,8 +134,8 @@ async def inbound_sms(request: Request) -> Response:
             # 3. Generate response using LLM
             response_text = generate_response(history)
             
-            # 4. Send response SMS (non-blocking)
-            sid = await asyncio.to_thread(send_sms, response_text)
+            # 4. Send response SMS to the sender (non-blocking)
+            sid = await asyncio.to_thread(send_sms, response_text, From)
             
             # 5. Store outbound message
             insert_message(config.DATABASE_PATH, 'outbound', response_text, sid)

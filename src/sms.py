@@ -17,27 +17,29 @@ def get_twilio_client(config: Settings) -> Client:
     """
     return Client(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN)
 
-def send_sms(body: str) -> str:
+def send_sms(body: str, to: str = None) -> str:
     """
-    Send an SMS message to the user.
-    
+    Send an SMS message to a recipient.
+
     Args:
         body: Message content to send
-        
+        to: Recipient phone number (defaults to USER_PHONE_NUMBER from config)
+
     Returns:
         Message SID from Twilio
-        
+
     Raises:
         Exception: If Twilio API call fails
     """
     config = get_settings()
     client = get_twilio_client(config)
-    
+    recipient = to or config.USER_PHONE_NUMBER
+
     try:
         message = client.messages.create(
             body=body,
             from_=config.TWILIO_PHONE_NUMBER,
-            to=config.USER_PHONE_NUMBER
+            to=recipient
         )
         
         message_sid = message.sid
