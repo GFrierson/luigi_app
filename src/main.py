@@ -1,9 +1,15 @@
 import asyncio
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, Response, Request
 from src.config import get_settings
+
+# Configure logging at module load time
+config = get_settings()
+logging.basicConfig(
+    level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 from src.database import init_db, seed_default_schedules, insert_message, get_recent_messages, deactivate_all_schedules
 from src.scheduler import create_scheduler, schedule_check_ins
 from src.agent import generate_response
