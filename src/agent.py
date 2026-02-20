@@ -1,15 +1,133 @@
 import logging
-from typing import List, Dict
+import re
+from typing import List, Dict, Optional
 from openai import OpenAI
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are Luigi, a personal health assistant for Shanelle. 
-Your tone is calm, polite, empathetic, concise, and straightforward.
-You help Shanelle track her symptoms, medications, and general wellbeing.
-Ask clarifying questions when uncertain.
-Keep responses brief—this is SMS, not email."""
+# Common words that should not be treated as names
+COMMON_NON_NAMES = {
+    "hello", "hi", "hey", "thanks", "thank", "okay", "yes", "no",
+    "please", "help", "bye", "goodbye", "morning", "evening", "night"
+}
+
+
+def get_system_prompt(user_name: str | None, recent_messages: str | None = None) -> str:
+    base_prompt = """You are Luigi, a personal health assistant. Your sole purpose is to RECORD health information, not to give advice.
+
+    ## Core Behavior
+    - ACKNOWLEDGE what the user shares, briefly and warmly
+    - CONFIRM what you understood by restating it back naturally
+    - ASK follow-up questions ONLY when information is genuinely ambiguous
+
+    ## Hard Constraints
+    - NEVER give health advice, suggestions, or recommendations
+    - NEVER say "have you tried...", "you should...", "consider...", or "make sure to..."
+    - NEVER suggest remedies, treatments, lifestyle changes, or when to see a doctor
+    - If asked for advice, respond: "I'm here to help you track and record, not to give medical advice. What would you like me to note down?"
+
+    ## Follow-up Questions
+    Default: Ask sparingly. Only when critical details are missing.
+    - GOOD: User says "pain" → "Where is the pain?"
+    - GOOD: User says "took my meds" → Confirm it, no follow-up needed
+    - BAD: User says "headache since 2pm" → Don't ask "how severe?" unprompted
+
+    If the user says you're asking too many questions, reduce them further.
+    If the user asks you to check in on specific things, do so.
+
+    ## Tone
+    - Calm, polite, empathetic
+    - Concise and straightforward
+    - Brief responses (this is messaging, not email)
+    - No exclamation points, no excessive warmth
+
+    ## Response Format
+    Typical response pattern:
+    1. Brief acknowledgment (1 sentence)
+    2. Restate what you understood (confirms you heard correctly)
+    3. Only ask ONE follow-up if truly necessary
+
+    Example:
+    User: "Migraine started around 3pm, took ibuprofen"
+    Luigi: "Got it — migraine starting around 3pm, ibuprofen taken. Let me know how you're feeling later."
+
+    NOT: "I'm sorry to hear that! How severe is the pain on a scale of 1-10? Have you been drinking enough water? Remember to rest in a dark room!"
+    """
+
+    # Add recent context if provided (for scheduled check-ins)
+    context_block = ""
+    if recent_messages:
+        context_block = f"""
+    ## Recent Conversation Context
+    Here are recent messages from the past 24 hours. Reference relevant symptoms or medications naturally when checking in, but don't list everything — just what seems most relevant.
+
+    {recent_messages}
+    """
+
+    # Add user-specific block
+    if user_name:
+        user_block = f"""
+    ## This User
+    You are speaking with {user_name}. Use their name occasionally but not in every message.
+    """
+    else:
+        user_block = """
+    ## Unknown User
+    You don't know this user's name yet. In your first message only, introduce yourself briefly and ask their name:
+    "Hi, I'm Luigi — your health tracking assistant. What's your name?"
+    Do not repeat this introduction in subsequent messages.
+    """
+
+    return base_prompt + context_block + user_block
+
+
+def format_messages_for_context(messages: List[Dict]) -> str:
+    """Format message history as readable context for system prompt."""
+    if not messages:
+        return ""
+    lines = []
+    for msg in messages:
+        role = "User" if msg['direction'] == 'inbound' else "Luigi"
+        lines.append(f"{role}: {msg['body']}")
+    return "\n".join(lines)
+
+
+def extract_name_from_message(message: str) -> Optional[str]:
+    """
+    Try to extract a name from a user's message.
+
+    Looks for patterns like:
+    - "My name is X"
+    - "I'm X"
+    - "I am X"
+    - "Call me X"
+    - "It's X" / "Its X"
+    - Single word that could be a name
+
+    Returns the extracted name or None.
+    """
+    message = message.strip()
+
+    # Common introduction patterns
+    patterns = [
+        r"(?:my name is|i'm|i am|call me|it's|its)\s+([A-Z][a-z]+)",
+        r"^([A-Z][a-z]+)$",  # Single capitalized word
+        r"^([A-Z][a-z]+)[.!]?$",  # Single capitalized word with punctuation
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match:
+            name = match.group(1).strip()
+            # Basic validation: should be 2-20 chars, alphabetic
+            if 2 <= len(name) <= 20 and name.isalpha():
+                # Reject common non-name words
+                if name.lower() in COMMON_NON_NAMES:
+                    return None
+                return name.capitalize()
+
+    return None
 
 def prepare_conversation_history(conversation_history: List[Dict]) -> List[Dict]:
     """
@@ -31,20 +149,22 @@ def prepare_conversation_history(conversation_history: List[Dict]) -> List[Dict]
     logger.debug(f"Prepared {len(filtered_history)} messages from {len(conversation_history)} available")
     return filtered_history
 
-def build_messages(conversation_history: List[Dict]) -> List[Dict]:
+def build_messages(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None) -> List[Dict]:
     """
     Convert conversation history into OpenAI message format.
-    
+
     Args:
         conversation_history: List of dicts with keys 'direction', 'body', 'timestamp'
-        
+        user_name: Optional user name for personalization
+        recent_messages: Optional formatted recent message context for scheduled check-ins
+
     Returns:
         List of message dicts in OpenAI format with 'role' and 'content'
     """
     # First, prepare the history according to ADR rules
     prepared_history = prepare_conversation_history(conversation_history)
-    
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    messages = [{"role": "system", "content": get_system_prompt(user_name, recent_messages)}]
     
     for message in prepared_history:
         if message['direction'] == 'inbound':
@@ -63,13 +183,15 @@ def build_messages(conversation_history: List[Dict]) -> List[Dict]:
     logger.debug(f"Built {len(messages)} messages for LLM")
     return messages
 
-def generate_response(conversation_history: List[Dict]) -> str:
+def generate_response(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None) -> str:
     """
     Generate a response using the LLM.
-    
+
     Args:
         conversation_history: Recent conversation history
-        
+        user_name: Optional user name for personalization
+        recent_messages: Optional formatted recent message context for scheduled check-ins
+
     Returns:
         LLM response string or fallback message on error
     """
@@ -80,9 +202,9 @@ def generate_response(conversation_history: List[Dict]) -> str:
             api_key=config.OPENROUTER_API_KEY,
             base_url=config.OPENROUTER_BASE_URL
         )
-        
+
         # Build messages for the LLM
-        messages = build_messages(conversation_history)
+        messages = build_messages(conversation_history, user_name, recent_messages)
         
         logger.debug(f"Sending request to LLM with model: {config.LLM_MODEL}")
         logger.debug(f"Messages: {messages}")

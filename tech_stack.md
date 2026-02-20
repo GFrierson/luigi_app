@@ -1,7 +1,7 @@
 # Health Tracker - Technical Stack
 
-**Version:** 1.0  
-**Last Updated:** February 2, 2026
+**Version:** 1.1  
+**Last Updated:** February 5, 2026
 
 ---
 
@@ -20,7 +20,7 @@
 
 ### Web Framework
 
-- **FastAPI** — Async webhook receiver for Twilio callbacks
+- **FastAPI** — Async webhook receiver for Telegram updates
 - **Uvicorn** — ASGI server to run FastAPI
 
 ### Database
@@ -31,23 +31,23 @@
 ### Scheduler
 
 - **APScheduler** — In-process job scheduling for timed check-ins
-- Timezone handling via `pytz` or `zoneinfo` (standard library in 3.12)
+- Timezone handling via `zoneinfo` (standard library in 3.12)
 
 ### LLM Integration
-	
-- **OpenAI Python SDK** (`openai`) — Used as client for OpenRouter (compatible API)
+
+- **OpenAI Python SDK** (`openai`) — Used as client for OpenRouter (compatible API)
 - Router: OpenRouter (https://openrouter.ai)
-- Model: `openai/gpt-4o-mini` (OpenRouter model string)
+- Model: `openai/gpt-4o-mini` (OpenRouter model string)
 - No LangChain or orchestration framework in v1
 
-### SMS Transport
+### Messaging Transport
 
-- **Twilio Python SDK** (`twilio`) — Send outbound SMS, validate inbound webhooks
+- **python-telegram-bot** (`python-telegram-bot`) — Telegram Bot API wrapper
+- Webhook mode (production) or polling mode (development)
 
 ### Local Development
 
-- **ngrok** — Expose local FastAPI server to public internet for Twilio webhooks
-- Not a Python dependency; installed separately
+- **ngrok** — Expose local FastAPI server for Telegram webhooks (optional; polling works without it)
 
 ---
 
@@ -61,13 +61,13 @@ health-tracker/
 │   ├── agent.py             # LLM conversation logic
 │   ├── database.py          # SQLite connection + queries
 │   ├── scheduler.py         # APScheduler setup + jobs
-│   ├── sms.py               # Twilio send/receive helpers
+│   ├── telegram_handler.py  # Telegram send/receive helpers
 │   └── config.py            # Environment variable loading
 ├── tests/
 │   ├── __init__.py
 │   ├── test_agent.py
 │   ├── test_database.py
-│   └── test_sms.py
+│   └── test_telegram.py
 ├── data/
 │   └── health_tracker.db    # SQLite database file (gitignored)
 ├── .env                     # Local environment variables (gitignored)
@@ -81,18 +81,12 @@ health-tracker/
 
 ## Environment Variables
 
-All secrets and configuration loaded from environment variables. Never hardcoded.
-
 ```bash
 # .env.example
 
-# Twilio
-TWILIO_ACCOUNT_SID=your_account_sid
-TWILIO_AUTH_TOKEN=your_auth_token
-TWILIO_PHONE_NUMBER=+1234567890
-
-# Recipient (Shanelle's phone)
-USER_PHONE_NUMBER=+1234567890
+# Telegram
+TELEGRAM_BOT_TOKEN=your_bot_token_from_botfather
+TELEGRAM_CHAT_ID=shanelles_chat_id
 
 # OpenRouter
 OPENROUTER_API_KEY=your_openrouter_api_key
@@ -105,6 +99,8 @@ DATABASE_PATH=data/health_tracker.db
 LOG_LEVEL=INFO
 ```
 
+**Note on TELEGRAM_CHAT_ID:** You'll obtain this after Shanelle messages the bot for the first time. The bot can log incoming chat IDs, and you hardcode hers for outbound scheduled messages.
+
 ---
 
 ## Dependencies (requirements.txt)
@@ -113,7 +109,7 @@ LOG_LEVEL=INFO
 fastapi>=0.109.0
 uvicorn>=0.27.0
 openai>=1.10.0
-twilio>=8.10.0
+python-telegram-bot>=21.0
 apscheduler>=3.10.0
 python-dotenv>=1.0.0
 httpx>=0.26.0
@@ -121,15 +117,13 @@ pytest>=8.0.0
 pytest-asyncio>=0.23.0
 ```
 
-No version caps on patch level; pin minor versions for stability.
-
 ---
 
 ## Database Schema
 
-### `messages` table
+No changes from original. Same `messages` and `schedules` tables.
 
-Stores all SMS traffic (inbound and outbound).
+### `messages` table
 
 ```sql
 CREATE TABLE IF NOT EXISTS messages (
@@ -137,15 +131,13 @@ CREATE TABLE IF NOT EXISTS messages (
     direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
     body TEXT NOT NULL,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    twilio_sid TEXT
+    telegram_message_id INTEGER
 );
 
 CREATE INDEX idx_messages_timestamp ON messages(timestamp);
 ```
 
 ### `schedules` table
-
-Stores scheduled prompt times.
 
 ```sql
 CREATE TABLE IF NOT EXISTS schedules (
@@ -163,83 +155,46 @@ CREATE TABLE IF NOT EXISTS schedules (
 
 |Method|Path|Purpose|
 |---|---|---|
-|POST|`/webhook/sms`|Receive inbound SMS from Twilio|
+|POST|`/webhook/telegram`|Receive updates from Telegram|
 |GET|`/health`|Health check (for monitoring)|
 
-No authentication on `/webhook/sms` in v1; Twilio request validation via signature header.
-
 ---
 
-## Logging Standard
+## Telegram Bot Setup (One-Time)
 
-All modules use Python's `logging` library. No print statements.
-
-```python
-import logging
-logger = logging.getLogger(__name__)
-```
-
-Log levels:
-
-- `INFO` — Message received, message sent, scheduled job fired
-- `DEBUG` — LLM prompt/response, database queries
-- `ERROR` — API failures, exceptions (with `exc_info=True`)
-
----
-
-## Testing Strategy
-
-- Framework: `pytest` + `pytest-asyncio`
-- Each module in `src/` has a corresponding test file in `tests/`
-- Tests use SQLite in-memory database (`:memory:`)
-- Twilio and OpenAI calls mocked; no live API calls in tests
+1. Open Telegram, search for **@BotFather**
+2. Send `/newbot`
+3. Choose a name: `Luigi Health Tracker`
+4. Choose a username: `luigi_health_bot` (must end in `bot`)
+5. Copy the token → put in `.env` as `TELEGRAM_BOT_TOKEN`
+6. Have Shanelle open Telegram, search for your bot, tap **Start**
+7. She sends any message; your bot logs her `chat_id`
+8. Put her `chat_id` in `.env` as `TELEGRAM_CHAT_ID`
 
 ---
 
 ## Deployment Notes
 
-### Local Development (macOS)
+### Local Development (macOS) — Polling Mode
 
 ```bash
-# Terminal 1: Run the app
+# No ngrok needed; bot polls Telegram servers
 uvicorn src.main:app --reload --port 8000
-
-# Terminal 2: Expose via ngrok
-ngrok http 8000
 ```
 
-Configure Twilio webhook URL to ngrok's HTTPS URL + `/webhook/sms`.
+### Production (Raspberry Pi) — Webhook Mode
 
-### Production (Raspberry Pi)
-
-- Clone repo, create `.env`, install dependencies in venv
-- Run via `systemd` service for auto-restart
-- No ngrok; configure router port forwarding or use Cloudflare Tunnel
-- SQLite file stored in `/home/pi/health-tracker/data/`
+- Set webhook URL via Telegram API: `https://yourdomain.com/webhook/telegram`
+- Run behind Cloudflare Tunnel or similar for HTTPS
+- Webhook is more efficient than polling for always-on deployment
 
 ---
-## Implementation Note
-
-The OpenAI Python SDK works with OpenRouter by overriding the base URL:
-
-python
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url=os.getenv("OPENROUTER_BASE_URL"),
-)
-```
 
 ## Future Considerations (Not in v1)
 
+- **Multi-user support:** Currently hardcoded to Shanelle's chat_id
+- **Rich messages:** Telegram supports buttons, inline keyboards, images
 - **Structured extraction:** Add `health_events` table for parsed symptoms/medications
-- **Natural language scheduling:** LLM extracts intent → inserts into `schedules`
-- **Web dashboard:** Read-only view of conversation history and trends
-- **Local-first mobile app:** Bundle SQLite + agent core into React Native or Flutter app
+- **Local-first mobile app:** Bundle SQLite + agent core into React Native or Flutter
 
 ---
-
-Copy this into `tech_stack.md` in your project knowledge. When ready, say **"Ready for todo"** and I'll generate the Aider implementation plan.

@@ -1,7 +1,7 @@
 fastapi>=0.109.0
 uvicorn>=0.27.0
 openai>=1.10.0
-twilio>=8.10.0
+python-telegram-bot>=21.0
 apscheduler>=3.10.0
 python-dotenv>=1.0.0
 httpx>=0.26.0

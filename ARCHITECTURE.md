@@ -214,3 +214,56 @@ pytest-asyncio>=0.23.0  # Async test support
 - Hardcoded system prompt (version-controlled, not runtime-editable)
 - Single-user design (Shanelle's phone number configured in `.env`)
 - No message retry logic (fail-fast on Twilio/OpenRouter errors)
+
+## ADR Addendum: Messaging Transport Pivot
+
+**Status:** Accepted  
+**Date:** February 2, 2026
+
+### Context
+
+Twilio SMS now requires A2P 10DLC business verification, including a registered business and website. This blocks development for personal/family use cases without corporate infrastructure.
+
+### Decision
+
+Pivot from Twilio SMS to **Telegram Bot API** as the messaging transport layer.
+
+### Technical Changes
+
+|Component|Before (Twilio)|After (Telegram)|
+|---|---|---|
+|Transport|Twilio SMS API|Telegram Bot API|
+|Library|`twilio`|`python-telegram-bot`|
+|Inbound|Webhook POST from Twilio|Webhook POST from Telegram (or polling)|
+|Outbound|`client.messages.create()`|`bot.send_message(chat_id, text)`|
+|User setup|None (just text a number)|Install Telegram, tap "Start" on bot|
+|Cost|~$0.01/message + $1.50/month|Free|
+|Verification|Business + website required|None|
+
+### User Experience Impact
+
+**Shanelle's new flow:**
+
+1. Install Telegram (once, if not already installed)
+2. Search for `luigi_health_bot`, tap **Start**
+3. Send and receive messages exactly like texting
+
+**Friction:** One-time app install. After that, functionally identical to SMS.
+
+### Rationale
+
+- **Zero verification:** Bot creation is instant via @BotFather
+- **Zero cost:** Telegram Bot API is completely free
+- **Richer features:** Supports buttons, images, and formatting (useful for future versions)
+- **Privacy:** Messages are encrypted in transit; bot only sees messages sent directly to it
+- **Simpler development:** Polling mode works without ngrok; no webhook signature validation needed
+
+### What Stays the Same
+
+- Agent logic (`src/agent.py`)
+- Database schema and queries (`src/database.py`)
+- Scheduler (`src/scheduler.py`)
+- Configuration pattern (`src/config.py`)
+- All tests (with mocked transport layer)
+
+Only `src/sms.py` is replaced with `src/telegram_handler.py`.   
