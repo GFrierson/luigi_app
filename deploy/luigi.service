@@ -1,0 +1,18 @@
+[Unit]
+Description=Luigi Health Tracker Bot
+After=network.target
+
+[Service]
+Type=simple
+User=luigi
+WorkingDirectory=/opt/luigi_app
+EnvironmentFile=/opt/luigi_app/.env
+ExecStart=/opt/luigi_app/.venv/bin/python -m src.main
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=luigi
+
+[Install]
+WantedBy=multi-user.target
