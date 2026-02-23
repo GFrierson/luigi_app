@@ -1,6 +1,9 @@
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
-from src.telegram_handler import get_bot, send_message, parse_update
+from telegram import Update, Message, Chat
+from telegram.ext import Application
+
+from src.telegram_handler import send_message, start_command, handle_message, _on_message, create_application
 from src.config import Settings
 
 
@@ -18,22 +21,14 @@ def mock_settings():
     )
 
 
-def test_get_bot_creates_bot_with_token(mock_settings):
-    """Test that get_bot creates a Bot with the correct token."""
-    with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
-         patch('src.telegram_handler.Bot') as mock_bot_class:
-        get_bot()
-        mock_bot_class.assert_called_once_with(token=mock_settings.TELEGRAM_BOT_TOKEN)
-
+# ---------------------------------------------------------------------------
+# send_message
+# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_send_message_returns_message_id(mock_settings):
-    """Test that send_message returns the message_id on success."""
-    test_chat_id = 123456789
-    test_text = "Test message"
+    """send_message returns the message_id on success."""
     expected_msg_id = 42
-
-    # Mock the bot's send_message response
     mock_message = MagicMock()
     mock_message.message_id = expected_msg_id
 
@@ -41,173 +36,189 @@ async def test_send_message_returns_message_id(mock_settings):
     mock_bot.send_message = AsyncMock(return_value=mock_message)
 
     with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
-         patch('src.telegram_handler.get_bot', return_value=mock_bot):
+         patch('src.telegram_handler.Bot', return_value=mock_bot):
+        message_id = await send_message(123456789, "Test message")
 
-        message_id = await send_message(test_chat_id, test_text)
-
-        assert message_id == expected_msg_id
-        mock_bot.send_message.assert_called_once_with(
-            chat_id=test_chat_id,
-            text=test_text
-        )
+    assert message_id == expected_msg_id
+    mock_bot.send_message.assert_called_once_with(chat_id=123456789, text="Test message")
 
 
 @pytest.mark.asyncio
 async def test_send_message_logs_on_success(mock_settings, caplog):
-    """Test that send_message logs success message."""
-    test_chat_id = 123456789
-    test_text = "Test message"
-    expected_msg_id = 42
-
+    """send_message logs a success message."""
     mock_message = MagicMock()
-    mock_message.message_id = expected_msg_id
+    mock_message.message_id = 42
 
     mock_bot = MagicMock()
     mock_bot.send_message = AsyncMock(return_value=mock_message)
 
     with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
-         patch('src.telegram_handler.get_bot', return_value=mock_bot), \
+         patch('src.telegram_handler.Bot', return_value=mock_bot), \
          caplog.at_level("INFO"):
+        await send_message(123456789, "Test message")
 
-        await send_message(test_chat_id, test_text)
-
-        assert "Telegram message sent successfully" in caplog.text
-        assert str(expected_msg_id) in caplog.text
+    assert "Telegram message sent successfully" in caplog.text
+    assert "42" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_send_message_raises_on_failure(mock_settings):
-    """Test that send_message raises exception on Telegram API failure."""
-    test_chat_id = 123456789
-    test_text = "Test message"
-
+    """send_message propagates Telegram API exceptions."""
     mock_bot = MagicMock()
     mock_bot.send_message = AsyncMock(side_effect=Exception("Telegram API Error"))
 
     with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
-         patch('src.telegram_handler.get_bot', return_value=mock_bot):
-
+         patch('src.telegram_handler.Bot', return_value=mock_bot):
         with pytest.raises(Exception, match="Telegram API Error"):
-            await send_message(test_chat_id, test_text)
+            await send_message(123456789, "Test message")
 
 
 @pytest.mark.asyncio
 async def test_send_message_logs_error_on_failure(mock_settings, caplog):
-    """Test that send_message logs error on failure."""
-    test_chat_id = 123456789
-    test_text = "Test message"
-
+    """send_message logs an error on failure."""
     mock_bot = MagicMock()
     mock_bot.send_message = AsyncMock(side_effect=Exception("Telegram API Error"))
 
     with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
-         patch('src.telegram_handler.get_bot', return_value=mock_bot), \
+         patch('src.telegram_handler.Bot', return_value=mock_bot), \
          caplog.at_level("ERROR"):
-
         try:
-            await send_message(test_chat_id, test_text)
+            await send_message(123456789, "Test message")
         except Exception:
-            pass  # Expected to raise
+            pass
 
-        assert "Failed to send Telegram message" in caplog.text
-        assert "Telegram API Error" in caplog.text
-
-
-def test_parse_update_extracts_fields():
-    """Test that parse_update correctly extracts fields from update data."""
-    update_data = {
-        'update_id': 123456,
-        'message': {
-            'message_id': 42,
-            'chat': {
-                'id': 123456789,
-                'type': 'private'
-            },
-            'text': 'Hello Luigi!'
-        }
-    }
-
-    result = parse_update(update_data)
-
-    assert result['chat_id'] == 123456789
-    assert result['text'] == 'Hello Luigi!'
-    assert result['message_id'] == 42
+    assert "Failed to send Telegram message" in caplog.text
+    assert "Telegram API Error" in caplog.text
 
 
-def test_parse_update_handles_missing_message(caplog):
-    """Test that parse_update handles missing message field."""
-    update_data = {
-        'update_id': 123456
-    }
+# ---------------------------------------------------------------------------
+# start_command
+# ---------------------------------------------------------------------------
 
-    with caplog.at_level("WARNING"):
-        result = parse_update(update_data)
+@pytest.mark.asyncio
+async def test_start_command_sends_welcome():
+    """start_command replies with a welcome message."""
+    mock_message = MagicMock()
+    mock_message.chat_id = 111222333
+    mock_message.reply_text = AsyncMock()
 
-    assert result['chat_id'] is None
-    assert result['text'] == ''
-    assert result['message_id'] is None
-    assert "missing chat_id" in caplog.text
-    assert "empty text" in caplog.text
-    assert "missing message_id" in caplog.text
+    mock_update = MagicMock()
+    mock_update.message = mock_message
 
+    mock_context = MagicMock()
 
-def test_parse_update_handles_empty_text(caplog):
-    """Test that parse_update handles empty text."""
-    update_data = {
-        'update_id': 123456,
-        'message': {
-            'message_id': 42,
-            'chat': {
-                'id': 123456789
-            },
-            'text': ''
-        }
-    }
+    await start_command(mock_update, mock_context)
 
-    with caplog.at_level("WARNING"):
-        result = parse_update(update_data)
-
-    assert result['chat_id'] == 123456789
-    assert result['text'] == ''
-    assert "empty text" in caplog.text
+    mock_message.reply_text.assert_called_once()
+    reply_text = mock_message.reply_text.call_args[0][0]
+    assert "Luigi" in reply_text
 
 
-def test_parse_update_strips_whitespace():
-    """Test that parse_update strips whitespace from text."""
-    update_data = {
-        'update_id': 123456,
-        'message': {
-            'message_id': 42,
-            'chat': {
-                'id': 123456789
-            },
-            'text': '  Hello there!  \n'
-        }
-    }
+@pytest.mark.asyncio
+async def test_start_command_logs_chat_id(caplog):
+    """start_command logs the new user's chat_id."""
+    mock_message = MagicMock()
+    mock_message.chat_id = 987654321
+    mock_message.reply_text = AsyncMock()
 
-    result = parse_update(update_data)
+    mock_update = MagicMock()
+    mock_update.message = mock_message
 
-    assert result['text'] == 'Hello there!'
+    with caplog.at_level("INFO"):
+        await start_command(mock_update, MagicMock())
+
+    assert "987654321" in caplog.text
 
 
-def test_parse_update_handles_photo_message(caplog):
-    """Test that parse_update handles messages without text (e.g., photos)."""
-    update_data = {
-        'update_id': 123456,
-        'message': {
-            'message_id': 42,
-            'chat': {
-                'id': 123456789
-            },
-            'photo': [{'file_id': 'some_file_id'}]
-            # No 'text' field
-        }
-    }
+# ---------------------------------------------------------------------------
+# _on_message
+# ---------------------------------------------------------------------------
 
-    with caplog.at_level("WARNING"):
-        result = parse_update(update_data)
+@pytest.mark.asyncio
+async def test_on_message_calls_handle_message():
+    """_on_message extracts fields from update and delegates to handle_message."""
+    mock_message = MagicMock()
+    mock_message.chat_id = 555666777
+    mock_message.text = "Hello Luigi"
+    mock_message.message_id = 99
 
-    assert result['chat_id'] == 123456789
-    assert result['text'] == ''
-    assert result['message_id'] == 42
-    assert "empty text" in caplog.text
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"scheduler": None}
+
+    with patch('src.telegram_handler.handle_message', new_callable=AsyncMock) as mock_handle:
+        await _on_message(mock_update, mock_context)
+
+    mock_handle.assert_called_once_with(555666777, "Hello Luigi", 99, scheduler=None)
+
+
+@pytest.mark.asyncio
+async def test_on_message_ignores_empty_text():
+    """_on_message does nothing when the message has no text."""
+    mock_message = MagicMock()
+    mock_message.chat_id = 555666777
+    mock_message.text = ""
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+
+    with patch('src.telegram_handler.handle_message', new_callable=AsyncMock) as mock_handle:
+        await _on_message(mock_update, MagicMock())
+
+    mock_handle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_message_ignores_no_message():
+    """_on_message does nothing when update has no message."""
+    mock_update = MagicMock()
+    mock_update.message = None
+
+    with patch('src.telegram_handler.handle_message', new_callable=AsyncMock) as mock_handle:
+        await _on_message(mock_update, MagicMock())
+
+    mock_handle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_message_passes_scheduler_from_bot_data():
+    """_on_message passes the scheduler from context.bot_data to handle_message."""
+    mock_scheduler = MagicMock()
+
+    mock_message = MagicMock()
+    mock_message.chat_id = 111
+    mock_message.text = "hi"
+    mock_message.message_id = 1
+
+    mock_update = MagicMock()
+    mock_update.message = mock_message
+
+    mock_context = MagicMock()
+    mock_context.bot_data = {"scheduler": mock_scheduler}
+
+    with patch('src.telegram_handler.handle_message', new_callable=AsyncMock) as mock_handle:
+        await _on_message(mock_update, mock_context)
+
+    mock_handle.assert_called_once_with(111, "hi", 1, scheduler=mock_scheduler)
+
+
+# ---------------------------------------------------------------------------
+# create_application
+# ---------------------------------------------------------------------------
+
+def test_create_application_returns_application():
+    """create_application returns a built Application instance."""
+    with patch('src.telegram_handler.Application') as mock_app_class:
+        mock_builder = MagicMock()
+        mock_app_class.builder.return_value = mock_builder
+        mock_builder.token.return_value = mock_builder
+        mock_built = MagicMock()
+        mock_builder.build.return_value = mock_built
+
+        result = create_application("fake_token")
+
+    mock_app_class.builder.assert_called_once()
+    mock_builder.token.assert_called_once_with("fake_token")
+    assert result is mock_built
