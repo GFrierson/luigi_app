@@ -1,83 +1,99 @@
-import asyncio
 import logging
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from src.config import get_settings
-from src.database import get_active_schedules, insert_message
-from src.sms import send_sms
+from src.database import get_active_schedules, get_all_user_databases, insert_message, get_recent_messages, get_user_name
+from src.telegram_handler import send_message
+from src.agent import generate_response, format_messages_for_context
 
 logger = logging.getLogger(__name__)
 
 def create_scheduler() -> AsyncIOScheduler:
     """
     Create and return an AsyncIOScheduler instance.
-    
+
     Returns:
         AsyncIOScheduler instance configured with the app timezone
     """
     config = get_settings()
     timezone = ZoneInfo(config.TIMEZONE)
-    
+
     scheduler = AsyncIOScheduler(timezone=timezone)
     logger.info(f"Scheduler created with timezone: {config.TIMEZONE}")
     return scheduler
 
 def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
     """
-    Schedule all active check-ins from the database.
-    
+    Schedule check-ins for ALL users.
+
     Args:
         scheduler: AsyncIOScheduler instance
     """
     config = get_settings()
-    schedules = get_active_schedules(config.DATABASE_PATH)
-    
-    for schedule in schedules:
-        hour = schedule['hour']
-        minute = schedule['minute']
-        message_template = schedule['message_template']
-        
-        trigger = CronTrigger(hour=hour, minute=minute)
-        
-        scheduler.add_job(
-            send_scheduled_message,
-            trigger,
-            args=[message_template],
-            id=f"checkin_{hour:02d}_{minute:02d}",
-            name=f"Check-in at {hour:02d}:{minute:02d}",
-            replace_existing=True
-        )
-        
-        logger.info(f"Scheduled check-in at {hour:02d}:{minute:02d}: {message_template[:50]}...")
-    
-    logger.info(f"Total scheduled check-ins: {len(schedules)}")
+    user_databases = get_all_user_databases(config.DATABASE_DIR)
 
-async def send_scheduled_message(message_template: str) -> None:
+    total_jobs = 0
+    for chat_id, db_path in user_databases:
+        schedules = get_active_schedules(db_path)
+
+        for schedule in schedules:
+            hour = schedule['hour']
+            minute = schedule['minute']
+            message_template = schedule['message_template']
+
+            trigger = CronTrigger(hour=hour, minute=minute)
+
+            scheduler.add_job(
+                send_scheduled_message,
+                trigger,
+                args=[message_template, chat_id, db_path],
+                id=f"checkin_{chat_id}_{hour:02d}_{minute:02d}",
+                name=f"Check-in for {chat_id} at {hour:02d}:{minute:02d}",
+                replace_existing=True
+            )
+
+            logger.info(f"Scheduled check-in for user {chat_id} at {hour:02d}:{minute:02d}")
+            total_jobs += 1
+
+    logger.info(f"Total scheduled check-ins: {total_jobs} for {len(user_databases)} users")
+
+async def send_scheduled_message(message_template: str, chat_id: int, db_path: str) -> None:
     """
-    Send a scheduled SMS message and log it to the database.
-    
+    Send a scheduled message to a specific user and log it to their database.
+
+    Uses the LLM to generate a contextual check-in message based on recent
+    conversation history. Falls back to the static template if LLM fails.
+
     Args:
-        message_template: The message template to send
+        message_template: The fallback message template to send
+        chat_id: Telegram chat ID of the recipient
+        db_path: Path to the user's database
     """
-    config = get_settings()
-    
     try:
-        # Send the SMS in a thread to avoid blocking the event loop
-        sid = await asyncio.to_thread(send_sms, message_template)
-        
-        # Log to database
-        await asyncio.to_thread(insert_message, config.DATABASE_PATH, 'outbound', message_template, sid)
-        
-        logger.info(f"Sent scheduled message with SID: {sid}")
-        
+        # Get user context for personalized check-in
+        user_name = get_user_name(db_path)
+        recent_history = get_recent_messages(db_path, limit=5, hours=24)
+        recent_context = format_messages_for_context(recent_history)
+
+        # Generate contextual check-in using LLM
+        # Use a simple prompt as the "user message" to trigger check-in generation
+        checkin_prompt = [{"direction": "inbound", "body": "This is a scheduled check-in. Generate a brief, contextual greeting."}]
+
+        response = generate_response(checkin_prompt, user_name, recent_context)
+
+        # Send the generated message
+        msg_id = await send_message(chat_id, response)
+        insert_message(db_path, 'outbound', response, msg_id)
+
+        logger.info(f"Sent scheduled check-in to {chat_id}")
+
     except Exception as e:
-        logger.error(f"Failed to send scheduled message: {message_template[:50]}...", exc_info=True)
-        # Try to send a fallback message as per ADR
+        logger.error(f"Failed to send scheduled message to {chat_id}", exc_info=True)
+        # Try to send a fallback message (use static template)
         try:
-            fallback_text = "This is your health assistant. I tried to send a scheduled check-in but encountered a technical issue. I'll try again later."
-            fallback_sid = await asyncio.to_thread(send_sms, fallback_text)
-            await asyncio.to_thread(insert_message, config.DATABASE_PATH, 'outbound', fallback_text, fallback_sid)
-            logger.info(f"Sent fallback message with SID: {fallback_sid}")
+            fallback_id = await send_message(chat_id, message_template)
+            insert_message(db_path, 'outbound', message_template, fallback_id)
+            logger.info(f"Sent fallback message to {chat_id} with ID: {fallback_id}")
         except Exception as fallback_e:
-            logger.error(f"Failed to send fallback message: {fallback_e}", exc_info=True)
+            logger.error(f"Failed to send fallback message to {chat_id}: {fallback_e}", exc_info=True)

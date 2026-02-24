@@ -1,137 +1,51 @@
-# Health Tracker v1 - Architecture Decision Record (ADR)
+# Product Requirements: Health Tracker (Luigi)
 
-**Status:** Accepted  
-**Date:** February 2, 2026
+## 1. Global Vision & Constraints
+* **Core Goal:** Text-based health tracking for a user with chronic illness.
+* **Tone:** Empathetic, warm, non-medical.
+* **Privacy:** Data stays local/private where possible.
+* **Tech Constraints:** MacBook M4 Host, Low Cost (OpenRouter), Python.
 
-## Context
+## 2. Active Feature Specs
 
-We are building a conversational health tracker for a user (Shanelle) with chronic illnesses. The core need is a low-friction way for her to log symptoms, medications, and general wellbeing through natural conversation. The system must be simple to use (just text a number), reliable, and preserve privacy by keeping data local.
+### [NEWEST] VPS Infrastructure & Deployment — ADR (Feb 19, 2026)
+**Status:** Accepted
+**Context:** Migrating from a Raspberry Pi target to an always-on VPS to support growth and remote development.
 
-## Decision
+**Decisions:**
+* **Provider:** Hetzner Cloud VPS (CAX11, ARM64, 2 vCPU, 4GB RAM) in US-East.
+* **Messaging Transport:** Simplified from FastAPI webhooks to `python-telegram-bot` **polling mode** as a single systemd process.
+* **Security:** Tailscale VPN for restricted SSH access; port 22 firewalled from public internet.
+* **Deployment:** Git-based workflow (`git pull` on VPS) with systemd for process management and auto-restarts.
 
-Build an SMS-based conversational agent named "Luigi" that:
+**Rationale:**
+* Hetzner provides the best price-to-performance; ARM64 maintains consistency with the original Pi target.
+* Polling mode eliminates the need for HTTP servers (FastAPI), SSL certificates, and public URL tunnels (ngrok), reducing operational complexity for a single-user bot.
 
-1. Responds to inbound texts with contextual, empathetic replies
-2. Sends scheduled check-in prompts (morning and evening)
-3. Stores all conversation history locally in SQLite
+---
 
-The system will run locally on developer hardware (MacBook Air for testing, Raspberry Pi for production) with Twilio handling SMS transport.
+### Feature: Check-in Scheduler
+* **User Story:** "As Shanelle, I want to receive a text at 9 AM asking how I feel..."
+* **Requirements:**
+    * Must handle timezones.
+    * Must allow user to reply "Stop" to cancel.
 
-## Technical Details
+## 3. Completed Features Log
 
-- **Runtime:** Python 3.12+
-- **Web Framework:** FastAPI (webhook receiver)
-- **Database:** SQLite (single file, portable)
-- **Scheduler:** APScheduler (in-process cron)
-- **LLM:** OpenAI GPT-4o-mini via OpenRouter API
-- **SMS Provider:** Twilio (inbound webhook + outbound API)
-- **Local Tunnel:** ngrok (development only)
+### [DONE] v1.1 Telegram Migration — Polling Mode & Multi-User Architecture (Feb 23, 2026)
+**Summary:** Completed migration from FastAPI webhook + Twilio SMS to a clean `python-telegram-bot` polling process. Preserved and formalized the multi-user architecture introduced during migration.
+* **Polling entrypoint:** `src/main.py` rewritten as a single `main()` function; `src/polling.py` deleted (merged).
+* **Multi-user architecture:** Each user gets their own SQLite DB keyed by `chat_id` under `DATABASE_DIR`; no hardcoded `TELEGRAM_CHAT_ID`.
+* **Handler consolidation:** All Telegram logic (`handle_message`, `_on_message`, `start_command`, `create_application`) lives in `src/telegram_handler.py`.
+* **Dependencies pruned:** Removed `fastapi`, `uvicorn`, `httpx`, `twilio` from `requirements.txt`.
+* **Deployment:** Added `deploy/luigi.service` systemd unit for VPS (Hetzner CAX11).
+* **Tests:** 57/57 passing.
 
-**Target Environments:**
+---
 
-- Development: macOS (Apple Silicon)
-- Production: Raspberry Pi (ARM64, Debian-based)
-
-**Schema (v1):**
-
-```sql
--- All conversations in a single table
-CREATE TABLE messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
-    body TEXT NOT NULL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    twilio_sid TEXT
-);
-
--- Scheduled prompts
-CREATE TABLE schedules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    hour INTEGER NOT NULL CHECK (hour >= 0 AND hour <= 23),
-    minute INTEGER NOT NULL CHECK (minute >= 0 AND minute <= 59),
-    message_template TEXT NOT NULL,
-    active BOOLEAN DEFAULT TRUE
-);
-```
-
-**Default Schedules:**
-
-- 10:00 AM EST — Morning check-in
-- 8:00 PM EST — Evening check-in
-
-**Agent Personality:**
-
-- Name: Luigi
-- Tone: Calm, polite, empathetic, concise, straightforward
-- Asks clarifying questions when uncertain
-- Example greeting: "Hello, this is Luigi - your personal health assistant. How are you feeling today Shanelle?"
-
-## Constraints
-
-- No external database services; SQLite only
-- No web UI in v1; all interaction via SMS
-- Code must run identically on macOS (ARM64) and Raspberry Pi (ARM64/Debian)
-- Twilio credentials stored in environment variables, never in code
-- All dependencies must be pip-installable (no compiled binaries that break cross-platform)
-
-## Rationale
-
-**SMS over WhatsApp/App:** Zero setup for the user. She just texts a number. WhatsApp requires Business API approval and app installation. A native app is future scope.
-
-**GPT-4o-mini over alternatives:** Best balance of cost ($0.15/$0.60 per 1M tokens), latency (~400ms), and conversational quality. DeepSeek is cheaper but has availability concerns and China-based data residency. Haiku is excellent but slightly more expensive with no meaningful quality gain for this use case.
-
-**SQLite over Postgres/Supabase:** Portability is paramount. SQLite runs anywhere, requires no server, and the database file can be copied directly to a Raspberry Pi or bundled into a future mobile app. At this scale (dozens of messages/day), SQLite handles everything.
-
-**FastAPI over Flask:** Async-native, better type hints, automatic OpenAPI docs. Negligible difference at this scale, but FastAPI is the more modern choice.
-
-**APScheduler over cron:** In-process scheduling simplifies deployment. No system-level cron configuration needed on the Pi. Schedules live in the database, not in crontab files.
-
-**Local-first architecture:** Keeps health data private. No cloud accounts, no third-party data storage. Future migration to a local-first mobile app remains straightforward.
-
-## Amendment - implmentation details
-# Health Tracker v1 - ADR Amendment: Implementation Details
-
-**Status:** Accepted  
-**Date:** February 2, 2026
-
-## Context
-
-Clarifications needed before implementation on conversation context, prompt storage, initialization, validation, and error handling.
-
-## Decisions
-
-### 1. LLM Conversation Context
-
-**Decision:** Feed the LLM the lesser of:
-
-- Last 24 hours of messages, OR
-- Last 5 messages
-
-**Rationale:** Keeps token costs low while preserving enough context for coherent replies. 5 messages is ~2-3 exchanges, sufficient for continuity.
-
-### 2. System Prompt Storage
-
-**Decision:** Hardcode Luigi's system prompt in `src/agent.py`.
-
-**Rationale:** Personality is stable for v1. Version control provides change history. No need for runtime editability yet.
-
-### 3. Scheduler Auto-Seeding
-
-**Decision:** On app startup, if `schedules` table is empty, auto-insert default check-ins:
-
-- 10:00 AM EST — "Good morning Shanelle! How are you feeling today?"
-- 8:00 PM EST — "Evening check-in: How was your day? Any symptoms or notes to share?"
-
-**Rationale:** Zero-friction first run. No manual SQL required.
-
-### 4. Twilio Webhook Validation
-
-**Decision:** Skip signature validation in v1. Add to backlog for v4.
-
-**Rationale:** Acceptable risk for MVP; ngrok URLs are ephemeral. Production hardening comes later.
-
-### 5. LLM Error Handling
-
-**Decision:** On OpenRouter failure, send fallback SMS: _"The LLM call is failing, I'll try again soon."_ Log the error with full exception details. Retry logic deferred to v2.
-
-**Rationale:** User should never be left without acknowledgment. Silent failures are bad UX for health tracking.
+### [DONE] Feature 1: The Telegram Pivot — ADR (Feb 2, 2026)
+**Summary:** Pivoted from Twilio/SMS to the Telegram Bot API to bypass A2P business verification requirements and eliminate messaging costs.
+* **Core Implementation:** Built "Luigi," a Telegram agent using `python-telegram-bot`, SQLite, and OpenRouter (GPT-4o-mini).
+* **Behavior:** Luigi records and restates health information for confirmation; he is strictly a tracker and is forbidden from giving medical advice.
+* **Persistence:** All conversation history and schedules are stored in a local-first SQLite database (`messages` and `schedules` tables).
+* **Foundation:** Established the empathetic, concise personality and the logic for cost-efficient conversation context.

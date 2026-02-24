@@ -3,3 +3,4 @@ agent_instructions/
 .env
 *.csv
 .env*
+claude/

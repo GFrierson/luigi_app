@@ -1,23 +1,47 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from src.agent import build_messages, generate_response, SYSTEM_PROMPT, prepare_conversation_history
+from src.agent import build_messages, generate_response, get_system_prompt, prepare_conversation_history, extract_name_from_message, format_messages_for_context
 from src.config import Settings
 
 @pytest.fixture
 def mock_settings():
     """Create mock settings for testing."""
     return Settings(
-        TWILIO_ACCOUNT_SID="test_sid",
-        TWILIO_AUTH_TOKEN="test_token",
-        TWILIO_PHONE_NUMBER="+1234567890",
-        USER_PHONE_NUMBER="+0987654321",
+        TELEGRAM_BOT_TOKEN="test_bot_token",
         OPENROUTER_API_KEY="test_api_key",
         OPENROUTER_BASE_URL="https://test.openrouter.ai/api/v1",
         LLM_MODEL="test-model",
         TIMEZONE="America/New_York",
-        DATABASE_PATH="test.db",
+        DATABASE_DIR="test_data/",
         LOG_LEVEL="INFO"
     )
+
+class TestFormatMessagesForContext:
+    """Tests for format_messages_for_context function."""
+
+    def test_formats_empty_list(self):
+        assert format_messages_for_context([]) == ""
+
+    def test_formats_single_inbound_message(self):
+        messages = [{"direction": "inbound", "body": "I have a headache"}]
+        result = format_messages_for_context(messages)
+        assert result == "User: I have a headache"
+
+    def test_formats_single_outbound_message(self):
+        messages = [{"direction": "outbound", "body": "Got it, headache noted."}]
+        result = format_messages_for_context(messages)
+        assert result == "Luigi: Got it, headache noted."
+
+    def test_formats_mixed_conversation(self):
+        messages = [
+            {"direction": "inbound", "body": "I have a migraine"},
+            {"direction": "outbound", "body": "Got it, migraine noted."},
+            {"direction": "inbound", "body": "Took ibuprofen"},
+        ]
+        result = format_messages_for_context(messages)
+        expected = "User: I have a migraine\nLuigi: Got it, migraine noted.\nUser: Took ibuprofen"
+        assert result == expected
+
 
 def test_prepare_conversation_history():
     """Test that prepare_conversation_history limits to at most 5 messages."""
@@ -44,10 +68,35 @@ def test_build_messages_includes_system_prompt():
     """Test that build_messages includes the system prompt."""
     conversation_history = []
     messages = build_messages(conversation_history)
-    
+
     assert len(messages) == 1
     assert messages[0]["role"] == "system"
-    assert messages[0]["content"] == SYSTEM_PROMPT
+    # Without a user name, should use the prompt that asks for name
+    assert messages[0]["content"] == get_system_prompt(None)
+    assert "What's your name?" in messages[0]["content"]
+
+
+def test_build_messages_with_user_name():
+    """Test that build_messages personalizes prompt with user name."""
+    conversation_history = []
+    messages = build_messages(conversation_history, user_name="Alice")
+
+    assert len(messages) == 1
+    assert messages[0]["role"] == "system"
+    assert "Alice" in messages[0]["content"]
+    assert "What's your name?" not in messages[0]["content"]
+
+
+def test_build_messages_with_recent_context():
+    """Test that build_messages includes recent context in system prompt."""
+    conversation_history = []
+    recent_context = "User: I have a migraine\nLuigi: Got it, migraine noted."
+    messages = build_messages(conversation_history, user_name="Alice", recent_messages=recent_context)
+
+    assert len(messages) == 1
+    assert messages[0]["role"] == "system"
+    assert "migraine" in messages[0]["content"]
+    assert "Recent Conversation Context" in messages[0]["content"]
 
 def test_build_messages_maps_directions_correctly():
     """Test that build_messages correctly maps directions to roles."""
@@ -134,7 +183,7 @@ def test_generate_response_returns_llm_content(mock_settings):
         )
         mock_client.chat.completions.create.assert_called_once_with(
             model=mock_settings.LLM_MODEL,
-            messages=build_messages(conversation_history),
+            messages=build_messages(conversation_history, None),
             max_tokens=300
         )
 
@@ -185,17 +234,61 @@ def test_generate_response_logs_error_on_failure(mock_settings, caplog):
     conversation_history = [
         {"direction": "inbound", "body": "Hello", "timestamp": "2024-01-01 10:00:00"},
     ]
-    
+
     with patch('src.agent.OpenAI') as mock_openai_class, \
          patch('src.agent.get_settings', return_value=mock_settings):
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = Exception("Test error")
         mock_openai_class.return_value = mock_client
-        
+
         with caplog.at_level("ERROR"):
             response = generate_response(conversation_history)
-        
+
         # Should log the error
         assert "LLM API call failed" in caplog.text
         # Should return fallback message
         assert response == "The LLM call is failing, I'll try again soon."
+
+
+class TestExtractNameFromMessage:
+    """Tests for extract_name_from_message function."""
+
+    def test_extracts_my_name_is(self):
+        assert extract_name_from_message("My name is Alice") == "Alice"
+        assert extract_name_from_message("my name is bob") == "Bob"
+
+    def test_extracts_im(self):
+        assert extract_name_from_message("I'm Sarah") == "Sarah"
+        assert extract_name_from_message("i'm john") == "John"
+
+    def test_extracts_i_am(self):
+        assert extract_name_from_message("I am Michael") == "Michael"
+
+    def test_extracts_call_me(self):
+        assert extract_name_from_message("Call me Emma") == "Emma"
+
+    def test_extracts_its(self):
+        assert extract_name_from_message("It's David") == "David"
+        assert extract_name_from_message("Its Lisa") == "Lisa"
+
+    def test_extracts_single_word_name(self):
+        assert extract_name_from_message("James") == "James"
+        assert extract_name_from_message("Anna!") == "Anna"
+
+    def test_returns_none_for_non_name(self):
+        assert extract_name_from_message("Hello there") is None
+        assert extract_name_from_message("How are you?") is None
+        assert extract_name_from_message("123") is None
+
+    def test_returns_none_for_too_short(self):
+        assert extract_name_from_message("A") is None
+        assert extract_name_from_message("My name is X") is None
+
+    def test_returns_none_for_too_long(self):
+        assert extract_name_from_message("Supercalifragilisticexpialidocious") is None
+
+    def test_returns_none_for_greetings(self):
+        assert extract_name_from_message("Hello") is None
+        assert extract_name_from_message("Hi") is None
+        assert extract_name_from_message("Hey") is None
+        assert extract_name_from_message("Thanks") is None
