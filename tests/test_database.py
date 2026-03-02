@@ -2,11 +2,12 @@ import pytest
 import sqlite3
 import tempfile
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from src.database import (
     get_connection, init_db, insert_message, get_recent_messages,
     get_active_schedules, seed_default_schedules, get_user_db_path,
-    get_all_user_databases, deactivate_all_schedules, get_user_name, set_user_name
+    get_all_user_databases, deactivate_all_schedules,
+    set_telegram_name, set_preferred_name, get_display_name,
 )
 
 @pytest.fixture
@@ -100,14 +101,14 @@ def test_get_recent_messages_respects_time_window(temp_db):
     cursor = conn.cursor()
 
     # Insert an old message (more than 24 hours ago)
-    old_time = (datetime.now() - timedelta(hours=25)).strftime('%Y-%m-%d %H:%M:%S')
+    old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute(
         "INSERT INTO messages (direction, body, timestamp) VALUES (?, ?, ?)",
         ('inbound', 'Old message', old_time)
     )
 
     # Insert a recent message
-    recent_time = (datetime.now() - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+    recent_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute(
         "INSERT INTO messages (direction, body, timestamp) VALUES (?, ?, ?)",
         ('inbound', 'Recent message', recent_time)
@@ -312,29 +313,65 @@ def test_get_all_user_databases_returns_correct_paths(temp_dir):
 
 # User profile tests
 
-def test_get_user_name_returns_none_for_new_user(temp_db):
-    """Test that get_user_name returns None for a new user."""
+def test_get_display_name_returns_none_for_new_user(temp_db):
+    """get_display_name returns None when no name is set."""
+    init_db(temp_db)
+    assert get_display_name(temp_db) is None
+
+
+def test_set_telegram_name_sets_display_name(temp_db):
+    """set_telegram_name stores the Telegram name and get_display_name returns it."""
+    init_db(temp_db)
+    set_telegram_name(temp_db, "Alice")
+    assert get_display_name(temp_db) == "Alice"
+
+
+def test_set_preferred_name_overrides_telegram_name(temp_db):
+    """get_display_name returns preferred name over telegram_name."""
+    init_db(temp_db)
+    set_telegram_name(temp_db, "Alice")
+    set_preferred_name(temp_db, "Nel")
+    assert get_display_name(temp_db) == "Nel"
+
+
+def test_get_display_name_falls_back_to_telegram_name(temp_db):
+    """get_display_name returns telegram_name when preferred name is not set."""
+    init_db(temp_db)
+    set_telegram_name(temp_db, "Bob")
+    assert get_display_name(temp_db) == "Bob"
+
+
+def test_set_preferred_name_updates_existing(temp_db):
+    """set_preferred_name updates an already-set preferred name."""
+    init_db(temp_db)
+    set_preferred_name(temp_db, "Alice")
+    assert get_display_name(temp_db) == "Alice"
+    set_preferred_name(temp_db, "Bob")
+    assert get_display_name(temp_db) == "Bob"
+
+
+def test_init_db_migration_adds_telegram_name_column(temp_db):
+    """init_db adds telegram_name column to existing DBs without it."""
+    # Create a DB with the old schema (no telegram_name column)
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_profile (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            name TEXT
+        )
+    """)
+    cursor.execute("INSERT OR IGNORE INTO user_profile (id, name) VALUES (1, NULL)")
+    conn.commit()
+    conn.close()
+
+    # Running init_db should add the column without error
     init_db(temp_db)
 
-    name = get_user_name(temp_db)
-    assert name is None
-
-
-def test_set_user_name_stores_name(temp_db):
-    """Test that set_user_name stores the name correctly."""
-    init_db(temp_db)
-
-    set_user_name(temp_db, "Alice")
-    name = get_user_name(temp_db)
-    assert name == "Alice"
-
-
-def test_set_user_name_updates_existing_name(temp_db):
-    """Test that set_user_name updates an existing name."""
-    init_db(temp_db)
-
-    set_user_name(temp_db, "Alice")
-    assert get_user_name(temp_db) == "Alice"
-
-    set_user_name(temp_db, "Bob")
-    assert get_user_name(temp_db) == "Bob"
+    # Column should now exist
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT telegram_name FROM user_profile WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+    assert row is not None

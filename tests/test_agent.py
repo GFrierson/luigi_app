@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from src.agent import build_messages, generate_response, get_system_prompt, prepare_conversation_history, extract_name_from_message, format_messages_for_context
+from src.agent import build_messages, generate_response, get_system_prompt, prepare_conversation_history, format_messages_for_context
 from src.config import Settings
 
 @pytest.fixture
@@ -71,9 +71,9 @@ def test_build_messages_includes_system_prompt():
 
     assert len(messages) == 1
     assert messages[0]["role"] == "system"
-    # Without a user name, should use the prompt that asks for name
     assert messages[0]["content"] == get_system_prompt(None)
-    assert "What's your name?" in messages[0]["content"]
+    # No longer asks for name; greets warmly instead
+    assert "What's your name?" not in messages[0]["content"]
 
 
 def test_build_messages_with_user_name():
@@ -85,6 +85,18 @@ def test_build_messages_with_user_name():
     assert messages[0]["role"] == "system"
     assert "Alice" in messages[0]["content"]
     assert "What's your name?" not in messages[0]["content"]
+
+
+def test_system_prompt_includes_preferred_name_instruction():
+    """System prompt should instruct Luigi to emit [PREFERRED_NAME: X] tag."""
+    prompt = get_system_prompt(None)
+    assert "PREFERRED_NAME" in prompt
+
+
+def test_system_prompt_no_name_does_not_ask_for_name():
+    """When no name is known, prompt should not ask for user's name."""
+    prompt = get_system_prompt(None)
+    assert "What's your name?" not in prompt
 
 
 def test_build_messages_with_recent_context():
@@ -250,45 +262,3 @@ def test_generate_response_logs_error_on_failure(mock_settings, caplog):
         assert response == "The LLM call is failing, I'll try again soon."
 
 
-class TestExtractNameFromMessage:
-    """Tests for extract_name_from_message function."""
-
-    def test_extracts_my_name_is(self):
-        assert extract_name_from_message("My name is Alice") == "Alice"
-        assert extract_name_from_message("my name is bob") == "Bob"
-
-    def test_extracts_im(self):
-        assert extract_name_from_message("I'm Sarah") == "Sarah"
-        assert extract_name_from_message("i'm john") == "John"
-
-    def test_extracts_i_am(self):
-        assert extract_name_from_message("I am Michael") == "Michael"
-
-    def test_extracts_call_me(self):
-        assert extract_name_from_message("Call me Emma") == "Emma"
-
-    def test_extracts_its(self):
-        assert extract_name_from_message("It's David") == "David"
-        assert extract_name_from_message("Its Lisa") == "Lisa"
-
-    def test_extracts_single_word_name(self):
-        assert extract_name_from_message("James") == "James"
-        assert extract_name_from_message("Anna!") == "Anna"
-
-    def test_returns_none_for_non_name(self):
-        assert extract_name_from_message("Hello there") is None
-        assert extract_name_from_message("How are you?") is None
-        assert extract_name_from_message("123") is None
-
-    def test_returns_none_for_too_short(self):
-        assert extract_name_from_message("A") is None
-        assert extract_name_from_message("My name is X") is None
-
-    def test_returns_none_for_too_long(self):
-        assert extract_name_from_message("Supercalifragilisticexpialidocious") is None
-
-    def test_returns_none_for_greetings(self):
-        assert extract_name_from_message("Hello") is None
-        assert extract_name_from_message("Hi") is None
-        assert extract_name_from_message("Hey") is None
-        assert extract_name_from_message("Thanks") is None

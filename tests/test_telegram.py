@@ -3,7 +3,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from telegram import Update, Message, Chat
 from telegram.ext import Application
 
-from src.telegram_handler import send_message, start_command, handle_message, _on_message, create_application
+from src.telegram_handler import send_message, start_command, handle_message, _on_message, create_application, _extract_preferred_name_tag
 from src.config import Settings
 
 
@@ -137,10 +137,14 @@ async def test_start_command_logs_chat_id(caplog):
 @pytest.mark.asyncio
 async def test_on_message_calls_handle_message():
     """_on_message extracts fields from update and delegates to handle_message."""
+    mock_from_user = MagicMock()
+    mock_from_user.first_name = "Alice"
+
     mock_message = MagicMock()
     mock_message.chat_id = 555666777
     mock_message.text = "Hello Luigi"
     mock_message.message_id = 99
+    mock_message.from_user = mock_from_user
 
     mock_update = MagicMock()
     mock_update.message = mock_message
@@ -151,7 +155,7 @@ async def test_on_message_calls_handle_message():
     with patch('src.telegram_handler.handle_message', new_callable=AsyncMock) as mock_handle:
         await _on_message(mock_update, mock_context)
 
-    mock_handle.assert_called_once_with(555666777, "Hello Luigi", 99, scheduler=None)
+    mock_handle.assert_called_once_with(555666777, "Hello Luigi", 99, scheduler=None, telegram_first_name="Alice")
 
 
 @pytest.mark.asyncio
@@ -187,10 +191,14 @@ async def test_on_message_passes_scheduler_from_bot_data():
     """_on_message passes the scheduler from context.bot_data to handle_message."""
     mock_scheduler = MagicMock()
 
+    mock_from_user = MagicMock()
+    mock_from_user.first_name = "Bob"
+
     mock_message = MagicMock()
     mock_message.chat_id = 111
     mock_message.text = "hi"
     mock_message.message_id = 1
+    mock_message.from_user = mock_from_user
 
     mock_update = MagicMock()
     mock_update.message = mock_message
@@ -201,7 +209,7 @@ async def test_on_message_passes_scheduler_from_bot_data():
     with patch('src.telegram_handler.handle_message', new_callable=AsyncMock) as mock_handle:
         await _on_message(mock_update, mock_context)
 
-    mock_handle.assert_called_once_with(111, "hi", 1, scheduler=mock_scheduler)
+    mock_handle.assert_called_once_with(111, "hi", 1, scheduler=mock_scheduler, telegram_first_name="Bob")
 
 
 # ---------------------------------------------------------------------------
@@ -222,3 +230,32 @@ def test_create_application_returns_application():
     mock_app_class.builder.assert_called_once()
     mock_builder.token.assert_called_once_with("fake_token")
     assert result is mock_built
+
+
+# ---------------------------------------------------------------------------
+# _extract_preferred_name_tag
+# ---------------------------------------------------------------------------
+
+def test_extract_preferred_name_tag_finds_tag():
+    """_extract_preferred_name_tag extracts name and strips the tag."""
+    text = "Of course, I'll call you Nel from now on. [PREFERRED_NAME: Nel]"
+    cleaned, name = _extract_preferred_name_tag(text)
+    assert name == "Nel"
+    assert "[PREFERRED_NAME" not in cleaned
+    assert "Of course" in cleaned
+
+
+def test_extract_preferred_name_tag_returns_none_when_absent():
+    """_extract_preferred_name_tag returns None name when no tag present."""
+    text = "Got it, headache noted."
+    cleaned, name = _extract_preferred_name_tag(text)
+    assert name is None
+    assert cleaned == text
+
+
+def test_extract_preferred_name_tag_handles_whitespace():
+    """_extract_preferred_name_tag handles whitespace around name."""
+    text = "Sure! [PREFERRED_NAME:   Sam  ]"
+    cleaned, name = _extract_preferred_name_tag(text)
+    assert name == "Sam"
+    assert "[PREFERRED_NAME" not in cleaned

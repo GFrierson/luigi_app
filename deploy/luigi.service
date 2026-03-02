@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=luigi
 WorkingDirectory=/opt/luigi_app
+Environment=TZ=UTC
 EnvironmentFile=/opt/luigi_app/.env
 ExecStart=/opt/luigi_app/.venv/bin/python -m src.main
 Restart=on-failure

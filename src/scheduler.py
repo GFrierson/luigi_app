@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from src.config import get_settings
-from src.database import get_active_schedules, get_all_user_databases, insert_message, get_recent_messages, get_user_name
+from src.database import get_active_schedules, get_all_user_databases, insert_message, get_recent_messages, get_display_name
 from src.telegram_handler import send_message
 from src.agent import generate_response, format_messages_for_context
 
@@ -72,7 +72,7 @@ async def send_scheduled_message(message_template: str, chat_id: int, db_path: s
     """
     try:
         # Get user context for personalized check-in
-        user_name = get_user_name(db_path)
+        user_name = get_display_name(db_path)
         recent_history = get_recent_messages(db_path, limit=5, hours=24)
         recent_context = format_messages_for_context(recent_history)
 

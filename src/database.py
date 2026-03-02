@@ -1,7 +1,7 @@
 import sqlite3
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -96,9 +96,16 @@ def init_db(db_path: str) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_profile (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            name TEXT
+            name TEXT,
+            telegram_name TEXT
         )
     """)
+
+    # Migration: add telegram_name to existing DBs that lack it
+    try:
+        cursor.execute("ALTER TABLE user_profile ADD COLUMN telegram_name TEXT")
+    except Exception:
+        pass  # Column already exists
 
     # Insert default profile row if not exists
     cursor.execute("""
@@ -136,7 +143,7 @@ def get_recent_messages(db_path: str, limit: int = 5, hours: int = 24) -> list[d
     cursor = conn.cursor()
 
     # Calculate cutoff time for hours-based query
-    cutoff_time = datetime.now() - timedelta(hours=hours)
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
     cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
 
     # First, get messages from last X hours
@@ -205,30 +212,46 @@ def deactivate_all_schedules(db_path: str) -> None:
     conn.close()
     logger.info("Deactivated all schedules")
 
-def get_user_name(db_path: str) -> Optional[str]:
-    """Get the user's name from the profile, or None if not set."""
-    conn = get_connection(db_path)
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT name FROM user_profile WHERE id = 1")
-    row = cursor.fetchone()
-    conn.close()
-
-    return row['name'] if row else None
-
-
-def set_user_name(db_path: str, name: str) -> None:
-    """Set the user's name in the profile."""
+def set_telegram_name(db_path: str, name: str) -> None:
+    """Set the Telegram-provided first name in the profile."""
     conn = get_connection(db_path)
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT OR REPLACE INTO user_profile (id, name) VALUES (1, ?)
+        UPDATE user_profile SET telegram_name = ? WHERE id = 1
     """, (name,))
 
     conn.commit()
     conn.close()
-    logger.info(f"Set user name to: {name}")
+    logger.debug(f"Set telegram_name to: {name}")
+
+
+def set_preferred_name(db_path: str, name: str) -> None:
+    """Set the user's preferred (explicitly chosen) name in the profile."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE user_profile SET name = ? WHERE id = 1
+    """, (name,))
+
+    conn.commit()
+    conn.close()
+    logger.info(f"Set preferred name to: {name}")
+
+
+def get_display_name(db_path: str) -> Optional[str]:
+    """Return preferred name if set, else telegram_name, else None."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT name, telegram_name FROM user_profile WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+    return row['name'] or row['telegram_name']
 
 
 def seed_default_schedules(db_path: str) -> None:
