@@ -2,7 +2,7 @@ import pytest
 import sqlite3
 import tempfile
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from src.database import (
     get_connection, init_db, insert_message, get_recent_messages,
     get_active_schedules, seed_default_schedules, get_user_db_path,
@@ -101,14 +101,14 @@ def test_get_recent_messages_respects_time_window(temp_db):
     cursor = conn.cursor()
 
     # Insert an old message (more than 24 hours ago)
-    old_time = (datetime.now() - timedelta(hours=25)).strftime('%Y-%m-%d %H:%M:%S')
+    old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute(
         "INSERT INTO messages (direction, body, timestamp) VALUES (?, ?, ?)",
         ('inbound', 'Old message', old_time)
     )
 
     # Insert a recent message
-    recent_time = (datetime.now() - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+    recent_time = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute(
         "INSERT INTO messages (direction, body, timestamp) VALUES (?, ?, ?)",
         ('inbound', 'Recent message', recent_time)

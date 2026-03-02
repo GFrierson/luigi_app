@@ -1,7 +1,7 @@
 import sqlite3
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,7 @@ def get_recent_messages(db_path: str, limit: int = 5, hours: int = 24) -> list[d
     cursor = conn.cursor()
 
     # Calculate cutoff time for hours-based query
-    cutoff_time = datetime.now() - timedelta(hours=hours)
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
     cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
 
     # First, get messages from last X hours
