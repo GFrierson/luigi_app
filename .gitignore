@@ -4,3 +4,4 @@ agent_instructions/
 *.csv
 .env*
 claude/
+vps_rebuild.md

@@ -42,7 +42,7 @@ def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
             minute = schedule['minute']
             message_template = schedule['message_template']
 
-            trigger = CronTrigger(hour=hour, minute=minute)
+            trigger = CronTrigger(hour=hour, minute=minute, timezone=ZoneInfo(config.TIMEZONE))
 
             scheduler.add_job(
                 send_scheduled_message,
