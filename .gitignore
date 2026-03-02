@@ -5,3 +5,5 @@ agent_instructions/
 .env*
 claude/
 vps_rebuild.md
+__pycache__/
+*.pyc
