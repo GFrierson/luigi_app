@@ -8,9 +8,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from src.config import get_settings
 from src.database import (
     init_db, seed_default_schedules, insert_message, get_recent_messages,
-    get_user_db_path, get_user_name, set_user_name, deactivate_all_schedules,
+    get_user_db_path, set_telegram_name, get_display_name, set_preferred_name,
+    deactivate_all_schedules,
 )
-from src.agent import generate_response, extract_name_from_message
+from src.agent import generate_response
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,22 @@ async def start_command(update: Update, context) -> None:
     )
 
 
-async def handle_message(chat_id: int, text: str, message_id: int, scheduler=None) -> str:
+def _extract_preferred_name_tag(response_text: str) -> tuple[str, str | None]:
+    """
+    Parse [PREFERRED_NAME: X] tag from LLM response.
+
+    Returns (cleaned_text, name_or_None).
+    """
+    import re
+    match = re.search(r'\[PREFERRED_NAME:\s*(.+?)\]', response_text)
+    if match:
+        name = match.group(1).strip()
+        cleaned = re.sub(r'\s*\[PREFERRED_NAME:\s*.+?\]', '', response_text).strip()
+        return cleaned, name
+    return response_text, None
+
+
+async def handle_message(chat_id: int, text: str, message_id: int, scheduler=None, telegram_first_name: str = None) -> str:
     """
     Process an incoming message and generate a response.
 
@@ -69,13 +85,19 @@ async def handle_message(chat_id: int, text: str, message_id: int, scheduler=Non
     db_path = get_user_db_path(config.DATABASE_DIR, chat_id)
     is_new_user = not os.path.exists(db_path)
 
+    # Always init so ALTER TABLE migration runs for existing users
+    init_db(db_path)
+
     if is_new_user:
-        init_db(db_path)
         seed_default_schedules(db_path)
         logger.info(f"Created new database for user {chat_id}")
         if scheduler:
             from src.scheduler import schedule_check_ins
             schedule_check_ins(scheduler)
+
+    # Store Telegram identity
+    if telegram_first_name:
+        set_telegram_name(db_path, telegram_first_name)
 
     insert_message(db_path, 'inbound', text, message_id)
 
@@ -97,17 +119,16 @@ async def handle_message(chat_id: int, text: str, message_id: int, scheduler=Non
         logger.info(f"User {chat_id} requested to stop schedules")
 
     else:
-        user_name = get_user_name(db_path)
-
-        if not user_name:
-            extracted_name = extract_name_from_message(text)
-            if extracted_name:
-                set_user_name(db_path, extracted_name)
-                user_name = extracted_name
-                logger.info(f"Extracted and saved user name: {user_name}")
+        display_name = get_display_name(db_path)
 
         history = get_recent_messages(db_path, limit=5, hours=24)
-        response_text = generate_response(history, user_name)
+        response_text = generate_response(history, display_name)
+
+        # Parse preferred name tag from LLM response
+        response_text, preferred_name = _extract_preferred_name_tag(response_text)
+        if preferred_name:
+            set_preferred_name(db_path, preferred_name)
+            logger.info(f"Saved preferred name for {chat_id}: {preferred_name}")
 
         sent_id = await send_message(chat_id, response_text)
         insert_message(db_path, 'outbound', response_text, sent_id)
@@ -128,11 +149,15 @@ async def _on_message(update: Update, context) -> None:
     if not text:
         return
 
+    telegram_first_name = None
+    if update.message.from_user:
+        telegram_first_name = update.message.from_user.first_name
+
     logger.info(f"Received message from chat {chat_id}: {text}")
 
     scheduler = context.bot_data.get("scheduler")
     try:
-        await handle_message(chat_id, text, message_id, scheduler=scheduler)
+        await handle_message(chat_id, text, message_id, scheduler=scheduler, telegram_first_name=telegram_first_name)
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
 

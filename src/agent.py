@@ -1,16 +1,9 @@
 import logging
-import re
 from typing import List, Dict, Optional
 from openai import OpenAI
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
-
-# Common words that should not be treated as names
-COMMON_NON_NAMES = {
-    "hello", "hi", "hey", "thanks", "thank", "okay", "yes", "no",
-    "please", "help", "bye", "goodbye", "morning", "evening", "night"
-}
 
 
 def get_system_prompt(user_name: str | None, recent_messages: str | None = None) -> str:
@@ -65,6 +58,14 @@ def get_system_prompt(user_name: str | None, recent_messages: str | None = None)
     {recent_messages}
     """
 
+    # Add preferred name detection instruction
+    preferred_name_block = """
+    ## Preferred Name
+    If the user asks you to call them a different name (e.g. "call me Nel", "my name is Sam"), acknowledge it warmly and include the tag [PREFERRED_NAME: <name>] at the very end of your response (after the visible text). This tag will be stripped before sending — it is only for internal processing.
+    Example: "Of course, I'll call you Nel from now on. [PREFERRED_NAME: Nel]"
+    Only include this tag when the user explicitly requests a name change.
+    """
+
     # Add user-specific block
     if user_name:
         user_block = f"""
@@ -73,13 +74,11 @@ def get_system_prompt(user_name: str | None, recent_messages: str | None = None)
     """
     else:
         user_block = """
-    ## Unknown User
-    You don't know this user's name yet. In your first message only, introduce yourself briefly and ask their name:
-    "Hi, I'm Luigi — your health tracking assistant. What's your name?"
-    Do not repeat this introduction in subsequent messages.
+    ## New User
+    You don't have a name for this user yet. Greet them warmly without asking for their name — you'll learn it naturally if they share it.
     """
 
-    return base_prompt + context_block + user_block
+    return base_prompt + context_block + preferred_name_block + user_block
 
 
 def format_messages_for_context(messages: List[Dict]) -> str:
@@ -92,42 +91,6 @@ def format_messages_for_context(messages: List[Dict]) -> str:
         lines.append(f"{role}: {msg['body']}")
     return "\n".join(lines)
 
-
-def extract_name_from_message(message: str) -> Optional[str]:
-    """
-    Try to extract a name from a user's message.
-
-    Looks for patterns like:
-    - "My name is X"
-    - "I'm X"
-    - "I am X"
-    - "Call me X"
-    - "It's X" / "Its X"
-    - Single word that could be a name
-
-    Returns the extracted name or None.
-    """
-    message = message.strip()
-
-    # Common introduction patterns
-    patterns = [
-        r"(?:my name is|i'm|i am|call me|it's|its)\s+([A-Z][a-z]+)",
-        r"^([A-Z][a-z]+)$",  # Single capitalized word
-        r"^([A-Z][a-z]+)[.!]?$",  # Single capitalized word with punctuation
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, message, re.IGNORECASE)
-        if match:
-            name = match.group(1).strip()
-            # Basic validation: should be 2-20 chars, alphabetic
-            if 2 <= len(name) <= 20 and name.isalpha():
-                # Reject common non-name words
-                if name.lower() in COMMON_NON_NAMES:
-                    return None
-                return name.capitalize()
-
-    return None
 
 def prepare_conversation_history(conversation_history: List[Dict]) -> List[Dict]:
     """
