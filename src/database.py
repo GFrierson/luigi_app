@@ -6,6 +6,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+MAX_SCHEDULES = 10
+
 def get_connection(db_path: str) -> sqlite3.Connection:
     """Get a SQLite database connection."""
     conn = sqlite3.connect(db_path)
@@ -106,6 +108,11 @@ def init_db(db_path: str) -> None:
         cursor.execute("ALTER TABLE user_profile ADD COLUMN telegram_name TEXT")
     except Exception:
         pass  # Column already exists
+
+    # Migration: add unique index on schedules(hour, minute)
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_hour_minute ON schedules(hour, minute)
+    """)
 
     # Insert default profile row if not exists
     cursor.execute("""
@@ -211,6 +218,105 @@ def deactivate_all_schedules(db_path: str) -> None:
     conn.commit()
     conn.close()
     logger.info("Deactivated all schedules")
+
+def get_all_schedules(db_path: str) -> list[dict]:
+    """Get all schedules (active and inactive) from the database."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT id, hour, minute, message_template, active
+        FROM schedules
+        ORDER BY hour, minute
+    """)
+
+    schedules = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    logger.debug(f"Retrieved {len(schedules)} schedules (all)")
+    return schedules
+
+
+def add_schedule(db_path: str, hour: int, minute: int, message_template: str) -> dict | None:
+    """
+    Insert a new schedule. Returns created row dict or None on duplicate/max limit.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    # Enforce max schedules
+    cursor.execute("SELECT COUNT(*) as count FROM schedules")
+    if cursor.fetchone()['count'] >= MAX_SCHEDULES:
+        conn.close()
+        logger.warning(f"Max schedules ({MAX_SCHEDULES}) reached, cannot add {hour:02d}:{minute:02d}")
+        return None
+
+    try:
+        cursor.execute("""
+            INSERT INTO schedules (hour, minute, message_template, active)
+            VALUES (?, ?, ?, TRUE)
+        """, (hour, minute, message_template))
+        row_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        logger.info(f"Added schedule at {hour:02d}:{minute:02d}")
+        return {"id": row_id, "hour": hour, "minute": minute, "message_template": message_template, "active": True}
+    except sqlite3.IntegrityError:
+        conn.close()
+        logger.debug(f"Duplicate schedule at {hour:02d}:{minute:02d}, skipping")
+        return None
+
+
+def remove_schedule(db_path: str, hour: int, minute: int) -> bool:
+    """Delete schedule by time. Returns True if a row was deleted."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("DELETE FROM schedules WHERE hour = ? AND minute = ?", (hour, minute))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+
+    if deleted:
+        logger.info(f"Removed schedule at {hour:02d}:{minute:02d}")
+    return deleted
+
+
+def update_schedule_time(db_path: str, old_hour: int, old_minute: int, new_hour: int, new_minute: int) -> bool:
+    """Update a schedule's time. Returns True on success, False on not-found or duplicate target."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            UPDATE schedules SET hour = ?, minute = ?
+            WHERE hour = ? AND minute = ?
+        """, (new_hour, new_minute, old_hour, old_minute))
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        if updated:
+            logger.info(f"Updated schedule from {old_hour:02d}:{old_minute:02d} to {new_hour:02d}:{new_minute:02d}")
+        return updated
+    except sqlite3.IntegrityError:
+        conn.close()
+        logger.debug(f"Cannot update schedule to {new_hour:02d}:{new_minute:02d}, duplicate exists")
+        return False
+
+
+def reactivate_all_schedules(db_path: str) -> int:
+    """Set all schedules to active=TRUE. Returns count of updated rows."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("UPDATE schedules SET active = TRUE WHERE active = FALSE")
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    logger.info(f"Reactivated {count} schedules")
+    return count
+
 
 def set_telegram_name(db_path: str, name: str) -> None:
     """Set the Telegram-provided first name in the profile."""

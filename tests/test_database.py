@@ -8,6 +8,8 @@ from src.database import (
     get_active_schedules, seed_default_schedules, get_user_db_path,
     get_all_user_databases, deactivate_all_schedules,
     set_telegram_name, set_preferred_name, get_display_name,
+    get_all_schedules, add_schedule, remove_schedule,
+    update_schedule_time, reactivate_all_schedules, MAX_SCHEDULES,
 )
 
 @pytest.fixture
@@ -348,6 +350,146 @@ def test_set_preferred_name_updates_existing(temp_db):
     assert get_display_name(temp_db) == "Alice"
     set_preferred_name(temp_db, "Bob")
     assert get_display_name(temp_db) == "Bob"
+
+
+# New schedule CRUD tests
+
+def test_get_all_schedules_returns_active_and_inactive(temp_db):
+    """get_all_schedules returns both active and inactive schedules."""
+    init_db(temp_db)
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.executemany(
+        "INSERT INTO schedules (hour, minute, message_template, active) VALUES (?, ?, ?, ?)",
+        [(8, 0, "Morning", True), (20, 0, "Evening", False)]
+    )
+    conn.commit()
+    conn.close()
+
+    schedules = get_all_schedules(temp_db)
+    assert len(schedules) == 2
+
+
+def test_add_schedule_returns_created_row(temp_db):
+    """add_schedule inserts a new row and returns it."""
+    init_db(temp_db)
+    result = add_schedule(temp_db, 9, 30, "Morning check")
+    assert result is not None
+    assert result['hour'] == 9
+    assert result['minute'] == 30
+    assert result['active'] is True
+
+
+def test_add_schedule_duplicate_returns_none(temp_db):
+    """add_schedule returns None on duplicate hour:minute."""
+    init_db(temp_db)
+    add_schedule(temp_db, 9, 30, "First")
+    result = add_schedule(temp_db, 9, 30, "Duplicate")
+    assert result is None
+
+    # Only one schedule should exist
+    schedules = get_all_schedules(temp_db)
+    assert len(schedules) == 1
+
+
+def test_add_schedule_enforces_max_limit(temp_db):
+    """add_schedule returns None when MAX_SCHEDULES limit is reached."""
+    init_db(temp_db)
+    for i in range(MAX_SCHEDULES):
+        add_schedule(temp_db, i, 0, f"Schedule {i}")
+
+    result = add_schedule(temp_db, 23, 59, "One too many")
+    assert result is None
+
+    schedules = get_all_schedules(temp_db)
+    assert len(schedules) == MAX_SCHEDULES
+
+
+def test_remove_schedule_returns_true_on_success(temp_db):
+    """remove_schedule deletes matching row and returns True."""
+    init_db(temp_db)
+    add_schedule(temp_db, 10, 0, "Morning")
+    result = remove_schedule(temp_db, 10, 0)
+    assert result is True
+    assert len(get_all_schedules(temp_db)) == 0
+
+
+def test_remove_schedule_returns_false_when_not_found(temp_db):
+    """remove_schedule returns False when no matching schedule exists."""
+    init_db(temp_db)
+    result = remove_schedule(temp_db, 10, 0)
+    assert result is False
+
+
+def test_update_schedule_time_changes_time(temp_db):
+    """update_schedule_time moves a schedule to a new time."""
+    init_db(temp_db)
+    add_schedule(temp_db, 10, 0, "Morning")
+    result = update_schedule_time(temp_db, 10, 0, 8, 0)
+    assert result is True
+
+    schedules = get_all_schedules(temp_db)
+    assert len(schedules) == 1
+    assert schedules[0]['hour'] == 8
+    assert schedules[0]['minute'] == 0
+
+
+def test_update_schedule_time_returns_false_on_duplicate(temp_db):
+    """update_schedule_time returns False when target time already exists."""
+    init_db(temp_db)
+    add_schedule(temp_db, 10, 0, "Morning")
+    add_schedule(temp_db, 8, 0, "Early morning")
+    result = update_schedule_time(temp_db, 10, 0, 8, 0)
+    assert result is False
+
+
+def test_update_schedule_time_returns_false_when_not_found(temp_db):
+    """update_schedule_time returns False when source schedule doesn't exist."""
+    init_db(temp_db)
+    result = update_schedule_time(temp_db, 10, 0, 8, 0)
+    assert result is False
+
+
+def test_reactivate_all_schedules_returns_count(temp_db):
+    """reactivate_all_schedules reactivates all paused schedules and returns count."""
+    init_db(temp_db)
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.executemany(
+        "INSERT INTO schedules (hour, minute, message_template, active) VALUES (?, ?, ?, ?)",
+        [(8, 0, "Morning", False), (20, 0, "Evening", False), (12, 0, "Noon", True)]
+    )
+    conn.commit()
+    conn.close()
+
+    count = reactivate_all_schedules(temp_db)
+    assert count == 2
+
+    schedules = get_active_schedules(temp_db)
+    assert len(schedules) == 3
+
+
+def test_reactivate_all_schedules_after_deactivate(temp_db):
+    """Deactivate then reactivate restores all schedules."""
+    init_db(temp_db)
+    add_schedule(temp_db, 10, 0, "Morning")
+    add_schedule(temp_db, 20, 0, "Evening")
+
+    deactivate_all_schedules(temp_db)
+    assert len(get_active_schedules(temp_db)) == 0
+
+    reactivate_all_schedules(temp_db)
+    assert len(get_active_schedules(temp_db)) == 2
+
+
+def test_init_db_creates_unique_index(temp_db):
+    """init_db creates the unique index on schedules(hour, minute)."""
+    init_db(temp_db)
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_schedules_hour_minute'")
+    assert cursor.fetchone() is not None
+    conn.close()
 
 
 def test_init_db_migration_adds_telegram_name_column(temp_db):

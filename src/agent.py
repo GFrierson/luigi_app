@@ -6,7 +6,25 @@ from src.config import get_settings
 logger = logging.getLogger(__name__)
 
 
-def get_system_prompt(user_name: str | None, recent_messages: str | None = None) -> str:
+def format_schedule_for_prompt(schedules: list[dict]) -> str:
+    """Format schedule list for inclusion in the system prompt."""
+    if not schedules:
+        return "The user has no check-ins configured."
+    lines = []
+    for s in schedules:
+        time_str = f"{s['hour']:02d}:{s['minute']:02d}"
+        # Convert to 12-hour format for readability
+        hour = s['hour']
+        minute = s['minute']
+        period = "AM" if hour < 12 else "PM"
+        display_hour = hour % 12 or 12
+        status = "active" if s['active'] else "paused"
+        lines.append(f"- {display_hour}:{minute:02d} {period} ({status})")
+    count = len(schedules)
+    return f"The user has {count} check-in(s) configured:\n" + "\n".join(lines)
+
+
+def get_system_prompt(user_name: str | None, recent_messages: str | None = None, schedule_info: str | None = None) -> str:
     base_prompt = """You are Luigi, a personal health assistant. Your sole purpose is to RECORD health information, not to give advice.
 
     ## Core Behavior
@@ -66,6 +84,43 @@ def get_system_prompt(user_name: str | None, recent_messages: str | None = None)
     Only include this tag when the user explicitly requests a name change.
     """
 
+    # Add schedule context block
+    if schedule_info:
+        schedule_context_block = f"""
+    ## Current Check-in Schedule
+    {schedule_info}
+    """
+    else:
+        schedule_context_block = ""
+
+    # Add schedule management instructions
+    schedule_management_block = """
+    ## Schedule Management
+    When the user requests a change to their check-in schedule, respond naturally AND include exactly one schedule tag at the very end of your response. Tags are stripped before sending — they are for internal processing only.
+
+    Tag formats (use 24-hour HH:MM):
+    - Add a check-in: [SCHEDULE_ADD: HH:MM]
+    - Remove a check-in: [SCHEDULE_REMOVE: HH:MM]
+    - Move a check-in: [SCHEDULE_UPDATE: HH:MM > HH:MM]
+    - Pause all check-ins: [SCHEDULE_PAUSE]
+    - Resume all check-ins: [SCHEDULE_RESUME]
+
+    Rules:
+    - Include at most ONE tag per response
+    - Only include a tag when the user explicitly requests a schedule change
+    - When user says "stop", do NOT include [SCHEDULE_PAUSE] — that path is handled automatically
+    - Use 24-hour format (e.g. 2pm = 14:00, 8am = 08:00)
+    - When adding a check-in, acknowledge the specific time they requested
+
+    Examples:
+    User: "add a check-in at 2pm" → respond naturally + [SCHEDULE_ADD: 14:00]
+    User: "move my morning check-in to 8am" → respond naturally + [SCHEDULE_UPDATE: 10:00 > 08:00]
+    User: "remove the afternoon one" → respond naturally + [SCHEDULE_REMOVE: 14:00]
+    User: "pause my check-ins" → respond naturally + [SCHEDULE_PAUSE]
+    User: "resume check-ins" → respond naturally + [SCHEDULE_RESUME]
+    User: "what's my schedule?" → respond with the current schedule, no tag needed
+    """
+
     # Add user-specific block
     if user_name:
         user_block = f"""
@@ -78,7 +133,7 @@ def get_system_prompt(user_name: str | None, recent_messages: str | None = None)
     You don't have a name for this user yet. Greet them warmly without asking for their name — you'll learn it naturally if they share it.
     """
 
-    return base_prompt + context_block + preferred_name_block + user_block
+    return base_prompt + context_block + preferred_name_block + schedule_context_block + schedule_management_block + user_block
 
 
 def format_messages_for_context(messages: List[Dict]) -> str:
@@ -112,7 +167,7 @@ def prepare_conversation_history(conversation_history: List[Dict]) -> List[Dict]
     logger.debug(f"Prepared {len(filtered_history)} messages from {len(conversation_history)} available")
     return filtered_history
 
-def build_messages(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None) -> List[Dict]:
+def build_messages(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None, schedule_info: Optional[str] = None) -> List[Dict]:
     """
     Convert conversation history into OpenAI message format.
 
@@ -120,6 +175,7 @@ def build_messages(conversation_history: List[Dict], user_name: Optional[str] = 
         conversation_history: List of dicts with keys 'direction', 'body', 'timestamp'
         user_name: Optional user name for personalization
         recent_messages: Optional formatted recent message context for scheduled check-ins
+        schedule_info: Optional formatted schedule context for schedule management
 
     Returns:
         List of message dicts in OpenAI format with 'role' and 'content'
@@ -127,7 +183,7 @@ def build_messages(conversation_history: List[Dict], user_name: Optional[str] = 
     # First, prepare the history according to ADR rules
     prepared_history = prepare_conversation_history(conversation_history)
 
-    messages = [{"role": "system", "content": get_system_prompt(user_name, recent_messages)}]
+    messages = [{"role": "system", "content": get_system_prompt(user_name, recent_messages, schedule_info)}]
     
     for message in prepared_history:
         if message['direction'] == 'inbound':
@@ -146,7 +202,7 @@ def build_messages(conversation_history: List[Dict], user_name: Optional[str] = 
     logger.debug(f"Built {len(messages)} messages for LLM")
     return messages
 
-def generate_response(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None) -> str:
+def generate_response(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None, schedule_info: Optional[str] = None) -> str:
     """
     Generate a response using the LLM.
 
@@ -154,6 +210,7 @@ def generate_response(conversation_history: List[Dict], user_name: Optional[str]
         conversation_history: Recent conversation history
         user_name: Optional user name for personalization
         recent_messages: Optional formatted recent message context for scheduled check-ins
+        schedule_info: Optional formatted schedule context for schedule management
 
     Returns:
         LLM response string or fallback message on error
@@ -167,7 +224,7 @@ def generate_response(conversation_history: List[Dict], user_name: Optional[str]
         )
 
         # Build messages for the LLM
-        messages = build_messages(conversation_history, user_name, recent_messages)
+        messages = build_messages(conversation_history, user_name, recent_messages, schedule_info)
         
         logger.debug(f"Sending request to LLM with model: {config.LLM_MODEL}")
         logger.debug(f"Messages: {messages}")

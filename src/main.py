@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from src.config import get_settings
 from src.scheduler import create_scheduler, schedule_check_ins
-from src.telegram_handler import start_command, _on_message
+from src.telegram_handler import start_command, _on_message, schedule_command
 
 # Configure logging at module load time
 config = get_settings()
@@ -48,6 +48,7 @@ def main():
     application.bot_data["scheduler"] = scheduler
 
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("schedule", schedule_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_message))
 
     logger.info("Starting Luigi in polling mode...")

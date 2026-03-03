@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from src.config import get_settings
-from src.database import get_active_schedules, get_all_user_databases, insert_message, get_recent_messages, get_display_name
+from src.database import get_active_schedules, get_all_user_databases, insert_message, get_recent_messages, get_display_name, get_all_schedules
 from src.telegram_handler import send_message
 from src.agent import generate_response, format_messages_for_context
 
@@ -23,6 +23,54 @@ def create_scheduler() -> AsyncIOScheduler:
     logger.info(f"Scheduler created with timezone: {config.TIMEZONE}")
     return scheduler
 
+def add_user_job(scheduler: AsyncIOScheduler, chat_id: int, db_path: str, hour: int, minute: int, message_template: str) -> None:
+    """Register a single check-in job for a user."""
+    config = get_settings()
+    trigger = CronTrigger(hour=hour, minute=minute, timezone=ZoneInfo(config.TIMEZONE))
+    scheduler.add_job(
+        send_scheduled_message,
+        trigger,
+        args=[message_template, chat_id, db_path],
+        id=f"checkin_{chat_id}_{hour:02d}_{minute:02d}",
+        name=f"Check-in for {chat_id} at {hour:02d}:{minute:02d}",
+        replace_existing=True
+    )
+    logger.info(f"Added job for user {chat_id} at {hour:02d}:{minute:02d}")
+
+
+def remove_user_job(scheduler: AsyncIOScheduler, chat_id: int, hour: int, minute: int) -> bool:
+    """Remove a specific check-in job for a user. Returns True if removed."""
+    job_id = f"checkin_{chat_id}_{hour:02d}_{minute:02d}"
+    try:
+        scheduler.remove_job(job_id)
+        logger.info(f"Removed job {job_id}")
+        return True
+    except Exception:
+        logger.debug(f"Job {job_id} not found, nothing to remove")
+        return False
+
+
+def remove_all_user_jobs(scheduler: AsyncIOScheduler, chat_id: int) -> int:
+    """Remove all check-in jobs for a user. Returns count removed."""
+    jobs_to_remove = [
+        job.id for job in scheduler.get_jobs()
+        if job.id.startswith(f"checkin_{chat_id}_")
+    ]
+    for job_id in jobs_to_remove:
+        scheduler.remove_job(job_id)
+    logger.info(f"Removed {len(jobs_to_remove)} jobs for user {chat_id}")
+    return len(jobs_to_remove)
+
+
+def schedule_user_check_ins(scheduler: AsyncIOScheduler, chat_id: int, db_path: str) -> int:
+    """Register all active check-in jobs for a single user. Returns count registered."""
+    schedules = get_active_schedules(db_path)
+    for schedule in schedules:
+        add_user_job(scheduler, chat_id, db_path, schedule['hour'], schedule['minute'], schedule['message_template'])
+    logger.info(f"Registered {len(schedules)} jobs for user {chat_id}")
+    return len(schedules)
+
+
 def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
     """
     Schedule check-ins for ALL users.
@@ -35,26 +83,7 @@ def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
 
     total_jobs = 0
     for chat_id, db_path in user_databases:
-        schedules = get_active_schedules(db_path)
-
-        for schedule in schedules:
-            hour = schedule['hour']
-            minute = schedule['minute']
-            message_template = schedule['message_template']
-
-            trigger = CronTrigger(hour=hour, minute=minute, timezone=ZoneInfo(config.TIMEZONE))
-
-            scheduler.add_job(
-                send_scheduled_message,
-                trigger,
-                args=[message_template, chat_id, db_path],
-                id=f"checkin_{chat_id}_{hour:02d}_{minute:02d}",
-                name=f"Check-in for {chat_id} at {hour:02d}:{minute:02d}",
-                replace_existing=True
-            )
-
-            logger.info(f"Scheduled check-in for user {chat_id} at {hour:02d}:{minute:02d}")
-            total_jobs += 1
+        total_jobs += schedule_user_check_ins(scheduler, chat_id, db_path)
 
     logger.info(f"Total scheduled check-ins: {total_jobs} for {len(user_databases)} users")
 
