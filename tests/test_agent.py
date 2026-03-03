@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from src.agent import build_messages, generate_response, get_system_prompt, prepare_conversation_history, format_messages_for_context
+from src.agent import build_messages, generate_response, get_system_prompt, prepare_conversation_history, format_messages_for_context, format_schedule_for_prompt
 from src.config import Settings
 
 @pytest.fixture
@@ -240,6 +240,77 @@ def test_generate_response_handles_empty_response(mock_settings):
         
         # Should return fallback for empty response
         assert response == "I'm sorry, I didn't get a response. Could you try again?"
+
+class TestFormatScheduleForPrompt:
+    """Tests for format_schedule_for_prompt."""
+
+    def test_empty_schedule_list(self):
+        result = format_schedule_for_prompt([])
+        assert "no check-ins" in result.lower()
+
+    def test_single_active_schedule(self):
+        schedules = [{"hour": 10, "minute": 0, "active": True}]
+        result = format_schedule_for_prompt(schedules)
+        assert "1 check-in" in result
+        assert "active" in result
+        assert "10:00 AM" in result
+
+    def test_multiple_schedules_with_mixed_status(self):
+        schedules = [
+            {"hour": 10, "minute": 0, "active": True},
+            {"hour": 20, "minute": 0, "active": False},
+        ]
+        result = format_schedule_for_prompt(schedules)
+        assert "2 check-in" in result
+        assert "active" in result
+        assert "paused" in result
+
+    def test_pm_time_formatting(self):
+        schedules = [{"hour": 20, "minute": 0, "active": True}]
+        result = format_schedule_for_prompt(schedules)
+        assert "PM" in result
+
+    def test_midnight_edge_case(self):
+        schedules = [{"hour": 0, "minute": 0, "active": True}]
+        result = format_schedule_for_prompt(schedules)
+        assert "12:00 AM" in result
+
+    def test_noon_edge_case(self):
+        schedules = [{"hour": 12, "minute": 0, "active": True}]
+        result = format_schedule_for_prompt(schedules)
+        assert "12:00 PM" in result
+
+
+def test_system_prompt_includes_schedule_info():
+    """System prompt includes schedule context when schedule_info is provided."""
+    schedule_info = "The user has 2 check-in(s) configured:\n- 10:00 AM (active)\n- 8:00 PM (active)"
+    prompt = get_system_prompt(None, schedule_info=schedule_info)
+    assert "10:00 AM" in prompt
+    assert "Current Check-in Schedule" in prompt
+
+
+def test_system_prompt_omits_schedule_block_when_none():
+    """System prompt omits schedule context block when schedule_info is None."""
+    prompt = get_system_prompt(None, schedule_info=None)
+    assert "Current Check-in Schedule" not in prompt
+
+
+def test_system_prompt_includes_schedule_management_instructions():
+    """System prompt always includes schedule management tag instructions."""
+    prompt = get_system_prompt(None)
+    assert "SCHEDULE_ADD" in prompt
+    assert "SCHEDULE_REMOVE" in prompt
+    assert "SCHEDULE_UPDATE" in prompt
+    assert "SCHEDULE_PAUSE" in prompt
+    assert "SCHEDULE_RESUME" in prompt
+
+
+def test_build_messages_passes_schedule_info():
+    """build_messages includes schedule_info in the system prompt."""
+    schedule_info = "The user has 1 check-in(s) configured:\n- 10:00 AM (active)"
+    messages = build_messages([], schedule_info=schedule_info)
+    assert schedule_info in messages[0]["content"]
+
 
 def test_generate_response_logs_error_on_failure(mock_settings, caplog):
     """Test that generate_response logs errors on failure."""
