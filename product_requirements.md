@@ -8,32 +8,14 @@
 
 ## 2. Active Feature Specs
 
-### [NEWEST] Medication Tracking & Management — ADR (Mar 2, 2026)
-
-**Status:** Accepted
-
-**Context:** Luigi's core value proposition is health tracking, but it currently has no structured way to record medications, dosages, schedules, or adherence. Users with chronic illness often take multiple medications on complex schedules (daily, weekly, every 4 weeks) and need a system that understands grouping ("morning meds"), handles partial adherence (skips), and issues reminders — all through natural conversation.
-
-**Decisions:**
-
-- **Storage:** Three new tables (`medication_groups`, `medications`, `medication_events`) added to the existing per-user SQLite database (`data/{chat_id}.db`). No separate database.
-- **Grouping:** All scheduled medications belong to a group, even solo meds (implicit group of one). Groups carry schedule info (hour, minute, interval, anchor date) and support comma-separated aliases. Reminders fire at the group level, not per-medication.
-- **Scheduling:** Interval-based recurrence using `interval_days` + `start_date` anchor. Covers daily (1), weekly (7), biweekly (14), every-4-weeks (28), and any fixed cycle. Scheduler checks `(today - start_date) % interval_days == 0` to determine if a reminder fires.
-- **Skip Handling:** `medication_events` logs every medication in a group when reported, with a `status` field (`taken` | `skipped`). Intentional skips are explicit records, not missing data.
-- **LLM Architecture:** Two-call pipeline per message. Call 1 (Conversation): Luigi generates a natural response with no structured tags — personality prompt stays clean. Call 2 (Extraction): A separate LLM call receives the user message, Luigi's response, and current medication state, then returns structured JSON describing DB actions (`log_group`, `add_medication`, `create_group`, `log_single`, `modify_medication`, `none`).
-- **Capture Flow:** Conversational capture with explicit user confirmation for medication setup (add/modify). Direct logging without confirmation for daily adherence ("took my morning meds"). Multi-turn confirmation prevents silent bad data on setup.
-- **As-Needed Meds:** Not assigned to a group. Logged individually to `medication_events` when the user reports taking them.
-
-**Rationale:**
-
-- Per-user SQLite keeps the existing one-user-one-file pattern intact; no coordination overhead from a second database.
-- Group-level reminders prevent notification fatigue — one reminder per time slot instead of N reminders per medication.
-- Interval + anchor date covers the vast majority of real medication schedules without the complexity of cron expressions or RRULE parsing.
-- Explicit skip tracking preserves clinically meaningful adherence data (skipped ≠ forgot ≠ no data).
-- Two-call LLM separation keeps Luigi's conversational prompt focused on tone and personality while giving the extraction layer a dedicated prompt optimized for structured output. Models can be swapped independently. Cost impact is minimal at GPT-4o-mini pricing.
-- Conversational capture with confirmation aligns with Luigi's personality as a recorder who confirms understanding, not an autonomous data extractor.
+*(No active specs — see Section 3 for completed features.)*
 
 ## 3. Completed Features Log
+
+### [DONE] Medication Tracking & Management — ADR (Mar 2, 2026; implemented Mar 4, 2026)
+**Summary:** Implemented full medication tracking: three new DB tables (`medication_groups`, `medications`, `medication_events`), a two-call LLM pipeline that extracts structured medication actions from every message, group-level APScheduler reminders via `CronTrigger` with internal interval checks, and a non-blocking dispatch layer in `handle_message()`. Deviations from the ADR: multi-turn confirmation for `add_medication`/`create_group` is staged but not yet surfaced to the user (confirmation loop is future work); the extraction model is hardcoded to `openai/gpt-4o-mini` rather than inheriting from the `LLM_MODEL` config setting.
+
+
 
 ### [DONE] v1.1 Telegram Migration — Polling Mode & Multi-User Architecture (Feb 23, 2026)
 **Summary:** Completed migration from FastAPI webhook + Twilio SMS to a clean `python-telegram-bot` polling process. Preserved and formalized the multi-user architecture introduced during migration.

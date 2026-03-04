@@ -1,9 +1,14 @@
 import logging
+from datetime import date
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from src.config import get_settings
-from src.database import get_active_schedules, get_all_user_databases, insert_message, get_recent_messages, get_display_name, get_all_schedules
+from src.database import (
+    get_active_schedules, get_all_user_databases, insert_message, get_recent_messages,
+    get_display_name, get_all_schedules, get_all_active_medication_groups,
+    get_medications_by_group,
+)
 from src.telegram_handler import send_message
 from src.agent import generate_response, format_messages_for_context
 
@@ -71,6 +76,35 @@ def schedule_user_check_ins(scheduler: AsyncIOScheduler, chat_id: int, db_path: 
     return len(schedules)
 
 
+async def send_medication_reminder(group_name: str, chat_id: int, db_path: str, group_id: int, interval_days: int, start_date: str | None) -> None:
+    """
+    Send a medication reminder for a group.
+    Checks the interval: only fires if (today - start_date) % interval_days == 0.
+    """
+    try:
+        # Interval check
+        if start_date and interval_days > 1:
+            try:
+                start = date.fromisoformat(start_date)
+                delta = (date.today() - start).days
+                if delta % interval_days != 0:
+                    logger.debug(f"Skipping med reminder for '{group_name}' (day {delta}, interval {interval_days})")
+                    return
+            except ValueError:
+                logger.warning(f"Invalid start_date '{start_date}' for group '{group_name}', sending anyway")
+
+        meds = get_medications_by_group(db_path, group_id)
+        med_list = ", ".join(m['name'] for m in meds) if meds else "your medications"
+        message = f"Checking in — did you take your {group_name} ({med_list})?"
+
+        msg_id = await send_message(chat_id, message)
+        insert_message(db_path, 'outbound', message, msg_id)
+        logger.info(f"Sent medication reminder for '{group_name}' to chat {chat_id}")
+
+    except Exception:
+        logger.error(f"Failed to send medication reminder for '{group_name}' to {chat_id}", exc_info=True)
+
+
 def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
     """
     Schedule check-ins for ALL users.
@@ -82,10 +116,34 @@ def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
     user_databases = get_all_user_databases(config.DATABASE_DIR)
 
     total_jobs = 0
+    total_med_jobs = 0
     for chat_id, db_path in user_databases:
         total_jobs += schedule_user_check_ins(scheduler, chat_id, db_path)
 
+        # Register medication reminder jobs for each active group
+        groups = get_all_active_medication_groups(db_path)
+        for group in groups:
+            if group.get('schedule_hour') is None or group.get('schedule_minute') is None:
+                continue
+            job_id = f"med_reminder_{chat_id}_{group['id']}"
+            trigger = CronTrigger(
+                hour=group['schedule_hour'],
+                minute=group['schedule_minute'],
+                timezone=ZoneInfo(config.TIMEZONE),
+            )
+            scheduler.add_job(
+                send_medication_reminder,
+                trigger,
+                args=[group['name'], chat_id, db_path, group['id'], group.get('interval_days', 1), group.get('start_date')],
+                id=job_id,
+                name=f"Med reminder for {chat_id}: {group['name']}",
+                replace_existing=True,
+            )
+            total_med_jobs += 1
+            logger.info(f"Registered med reminder job '{job_id}' for '{group['name']}'")
+
     logger.info(f"Total scheduled check-ins: {total_jobs} for {len(user_databases)} users")
+    logger.info(f"Total medication reminder jobs: {total_med_jobs}")
 
 async def send_scheduled_message(message_template: str, chat_id: int, db_path: str) -> None:
     """

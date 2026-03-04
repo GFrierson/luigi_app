@@ -114,6 +114,49 @@ def init_db(db_path: str) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_hour_minute ON schedules(hour, minute)
     """)
 
+    # Create medication_groups table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS medication_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            aliases TEXT,
+            schedule_hour INTEGER CHECK (schedule_hour >= 0 AND schedule_hour <= 23),
+            schedule_minute INTEGER CHECK (schedule_minute >= 0 AND schedule_minute <= 59),
+            interval_days INTEGER DEFAULT 1,
+            start_date DATE,
+            reminder_active BOOLEAN DEFAULT TRUE
+        )
+    """)
+
+    # Create medications table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS medications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            dosage TEXT,
+            type TEXT NOT NULL CHECK (type IN ('scheduled', 'as_needed')),
+            group_id INTEGER REFERENCES medication_groups(id),
+            active BOOLEAN DEFAULT TRUE
+        )
+    """)
+
+    # Create medication_events table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS medication_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            medication_id INTEGER NOT NULL REFERENCES medications(id),
+            taken_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL CHECK (status IN ('taken', 'skipped')),
+            notes TEXT,
+            source TEXT NOT NULL CHECK (source IN ('user', 'reminder'))
+        )
+    """)
+
+    # Create index on medication_events(taken_at)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_medication_events_taken_at ON medication_events(taken_at)
+    """)
+
     # Insert default profile row if not exists
     cursor.execute("""
         INSERT OR IGNORE INTO user_profile (id, name) VALUES (1, NULL)
@@ -358,6 +401,188 @@ def get_display_name(db_path: str) -> Optional[str]:
     if not row:
         return None
     return row['name'] or row['telegram_name']
+
+
+def create_medication_group(
+    db_path: str,
+    name: str,
+    aliases: Optional[str],
+    schedule_hour: Optional[int],
+    schedule_minute: Optional[int],
+    interval_days: int = 1,
+    start_date: Optional[str] = None,
+) -> int:
+    """Insert a new medication group and return its id."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO medication_groups (name, aliases, schedule_hour, schedule_minute, interval_days, start_date)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (name, aliases, schedule_hour, schedule_minute, interval_days, start_date))
+    group_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    logger.info(f"Created medication group '{name}' with id {group_id}")
+    return group_id
+
+
+def create_medication(
+    db_path: str,
+    name: str,
+    dosage: Optional[str],
+    med_type: str,
+    group_id: Optional[int] = None,
+) -> int:
+    """Insert a new medication and return its id."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO medications (name, dosage, type, group_id)
+        VALUES (?, ?, ?, ?)
+    """, (name, dosage, med_type, group_id))
+    med_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    logger.info(f"Created medication '{name}' (type={med_type}) with id {med_id}")
+    return med_id
+
+
+def get_medications_by_group(db_path: str, group_id: int) -> list:
+    """Return all active medications in a group."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, dosage, type, group_id, active
+        FROM medications
+        WHERE group_id = ? AND active = TRUE
+    """, (group_id,))
+    meds = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    logger.debug(f"Retrieved {len(meds)} active medications for group {group_id}")
+    return meds
+
+
+def get_all_active_medication_groups(db_path: str) -> list:
+    """Return all medication groups where reminder_active=TRUE."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, aliases, schedule_hour, schedule_minute, interval_days, start_date, reminder_active
+        FROM medication_groups
+        WHERE reminder_active = TRUE
+    """)
+    groups = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    logger.debug(f"Retrieved {len(groups)} active medication groups")
+    return groups
+
+
+def find_medication_group(db_path: str, query: str) -> Optional[dict]:
+    """Match query against group name or aliases (case-insensitive). Returns first match or None."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, aliases, schedule_hour, schedule_minute, interval_days, start_date, reminder_active
+        FROM medication_groups
+    """)
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+
+    query_lower = query.lower().strip()
+    for row in rows:
+        if row['name'].lower() == query_lower:
+            return row
+        if row['aliases']:
+            for alias in row['aliases'].split(','):
+                if alias.strip().lower() == query_lower:
+                    return row
+    logger.debug(f"No medication group found matching '{query}'")
+    return None
+
+
+def get_all_medications(db_path: str) -> list:
+    """Return all active medications (both scheduled and as-needed)."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, dosage, type, group_id, active
+        FROM medications
+        WHERE active = TRUE
+    """)
+    meds = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    logger.debug(f"Retrieved {len(meds)} active medications")
+    return meds
+
+
+def get_medication_by_name(db_path: str, name: str) -> Optional[dict]:
+    """Case-insensitive lookup by medication name. Returns first active match or None."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, dosage, type, group_id, active
+        FROM medications
+        WHERE LOWER(name) = LOWER(?) AND active = TRUE
+    """, (name,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        logger.debug(f"Found medication '{name}'")
+        return dict(row)
+    logger.debug(f"No medication found with name '{name}'")
+    return None
+
+
+def log_medication_event(
+    db_path: str,
+    medication_id: int,
+    status: str,
+    source: str = 'user',
+    notes: Optional[str] = None,
+) -> int:
+    """Insert a medication event and return its id."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO medication_events (medication_id, status, source, notes)
+        VALUES (?, ?, ?, ?)
+    """, (medication_id, status, source, notes))
+    event_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    logger.info(f"Logged medication event: medication_id={medication_id}, status={status}, source={source}")
+    return event_id
+
+
+def log_group_events(
+    db_path: str,
+    group_id: int,
+    taken_ids: list,
+    skipped_ids: list,
+    source: str = 'user',
+) -> list:
+    """
+    Insert one event row per medication in the group.
+    taken_ids get status='taken', skipped_ids get status='skipped'.
+    Returns list of event ids.
+    """
+    event_ids = []
+    for med_id in taken_ids:
+        event_ids.append(log_medication_event(db_path, med_id, 'taken', source))
+    for med_id in skipped_ids:
+        event_ids.append(log_medication_event(db_path, med_id, 'skipped', source))
+    logger.info(f"Logged {len(event_ids)} events for group {group_id}: {len(taken_ids)} taken, {len(skipped_ids)} skipped")
+    return event_ids
+
+
+def deactivate_medication(db_path: str, medication_id: int) -> None:
+    """Set active=FALSE for a medication."""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE medications SET active = FALSE WHERE id = ?", (medication_id,))
+    conn.commit()
+    conn.close()
+    logger.info(f"Deactivated medication id={medication_id}")
 
 
 def seed_default_schedules(db_path: str) -> None:

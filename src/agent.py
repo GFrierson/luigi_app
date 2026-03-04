@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import List, Dict, Optional
 from openai import OpenAI
@@ -244,3 +245,101 @@ def generate_response(conversation_history: List[Dict], user_name: Optional[str]
     except Exception as e:
         logger.error("LLM API call failed", exc_info=True)
         return "The LLM call is failing, I'll try again soon."
+
+
+def get_medication_state_context(medications: List[Dict], groups: List[Dict]) -> str:
+    """Format current medication state as readable text for the extraction prompt."""
+    lines = []
+    if groups:
+        lines.append("Medication groups:")
+        for g in groups:
+            lines.append(f"  - {g['name']} (id={g['id']}, aliases={g.get('aliases', '')})")
+    if medications:
+        lines.append("Individual medications:")
+        for m in medications:
+            lines.append(f"  - {m['name']} (id={m['id']}, type={m['type']}, dosage={m.get('dosage', '')})")
+    if not lines:
+        return "No medications currently tracked."
+    return "\n".join(lines)
+
+
+def get_extraction_prompt() -> str:
+    """Return the system prompt for the medication extraction call (Call 2)."""
+    return """You are a medication data extractor. Given a user message and Luigi's response, determine if any medication action occurred.
+
+Return ONLY valid JSON — no prose, no explanation, no markdown. Your response must be parseable by json.loads().
+
+Action types and required fields:
+
+```json
+{"action": "log_group", "group_name": "<string>", "taken": "all"|"rest", "skipped": ["<name>", ...]}
+{"action": "log_single", "medication_name": "<string>", "status": "taken"|"skipped"}
+{"action": "add_medication", "name": "<string>", "dosage": "<string or null>", "type": "scheduled"|"as_needed", "group_name": "<string or null>", "schedule_hour": <int or null>, "schedule_minute": <int or null>}
+{"action": "create_group", "name": "<string>", "aliases": "<string or null>", "schedule_hour": <int or null>, "schedule_minute": <int or null>}
+{"action": "modify_medication", "medication_name": "<string>", "changes": {}}
+{"action": "none"}
+```
+
+Few-shot examples:
+
+User: "took my morning meds"
+Luigi: "Got it — morning meds logged."
+→ {"action": "log_group", "group_name": "morning meds", "taken": "all", "skipped": []}
+
+User: "took morning meds but skipped lorazepam"
+Luigi: "Noted — morning meds taken, lorazepam skipped."
+→ {"action": "log_group", "group_name": "morning meds", "taken": "rest", "skipped": ["lorazepam"]}
+
+User: "just took ibuprofen for my headache"
+Luigi: "Got it — ibuprofen taken."
+→ {"action": "log_single", "medication_name": "ibuprofen", "status": "taken"}
+
+User: "I have a headache"
+Luigi: "Noted — headache recorded."
+→ {"action": "none"}
+
+Rules:
+- If no medication action occurred, return {"action": "none"}
+- Only extract actions explicitly stated by the user
+- Do not infer or guess medications not mentioned
+"""
+
+
+def extract_medication_action(user_message: str, luigi_response: str, medication_state: str) -> dict:
+    """
+    Call GPT-4o-mini to extract a medication action from the conversation.
+    Returns a dict with at least {"action": "<type>"}.
+    On any parse failure, returns {"action": "none"}.
+    """
+    config = get_settings()
+    try:
+        client = OpenAI(
+            api_key=config.OPENROUTER_API_KEY,
+            base_url=config.OPENROUTER_BASE_URL
+        )
+
+        messages = [
+            {"role": "system", "content": get_extraction_prompt()},
+            {"role": "user", "content": (
+                f"Current medication state:\n{medication_state}\n\n"
+                f"User message: {user_message}\n"
+                f"Luigi response: {luigi_response}"
+            )},
+        ]
+
+        response = client.chat.completions.create(
+            model="openai/gpt-4o-mini",
+            messages=messages,
+            max_tokens=200,
+        )
+
+        content = response.choices[0].message.content
+        logger.debug(f"Extraction response: {content}")
+        result = json.loads(content.strip())
+        if "action" not in result:
+            return {"action": "none"}
+        return result
+
+    except Exception as e:
+        logger.warning(f"Medication extraction failed: {e}")
+        return {"action": "none"}

@@ -1,10 +1,13 @@
 import pytest
+import tempfile
+import os
 from unittest.mock import patch, MagicMock, AsyncMock
 from telegram import Update, Message, Chat
 from telegram.ext import Application
 
-from src.telegram_handler import send_message, start_command, handle_message, _on_message, create_application, _extract_preferred_name_tag
+from src.telegram_handler import send_message, start_command, handle_message, _on_message, create_application, _extract_preferred_name_tag, _process_medication_action
 from src.config import Settings
+from src.database import init_db, create_medication_group, create_medication
 
 
 @pytest.fixture
@@ -259,3 +262,122 @@ def test_extract_preferred_name_tag_handles_whitespace():
     cleaned, name = _extract_preferred_name_tag(text)
     assert name == "Sam"
     assert "[PREFERRED_NAME" not in cleaned
+
+
+# ---------------------------------------------------------------------------
+# Medication flow integration tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def temp_db_path():
+    """Create a temporary DB, init it, and yield its path."""
+    with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+        path = f.name
+    init_db(path)
+    yield path
+    os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_message_triggers_extraction_call(mock_settings, temp_db_path):
+    """After generate_response(), extract_medication_action() is called."""
+    mock_bot = MagicMock()
+    mock_bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+    with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
+         patch('src.telegram_handler.get_user_db_path', return_value=temp_db_path), \
+         patch('src.telegram_handler.Bot', return_value=mock_bot), \
+         patch('src.telegram_handler.generate_response', return_value="Noted."), \
+         patch('src.telegram_handler.extract_medication_action', return_value={"action": "none"}) as mock_extract:
+        await handle_message(123, "I have a headache", 1)
+
+    mock_extract.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_log_group_action_creates_events(mock_settings, temp_db_path):
+    """When extraction returns log_group, log_group_events() is called with correct IDs."""
+    group_id = create_medication_group(temp_db_path, "morning meds", None, 8, 0)
+    med_id = create_medication(temp_db_path, "metformin", "500mg", "scheduled", group_id)
+
+    mock_bot = MagicMock()
+    mock_bot.send_message = AsyncMock(return_value=MagicMock(message_id=2))
+
+    extraction_result = {"action": "log_group", "group_name": "morning meds", "taken": "all", "skipped": []}
+
+    with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
+         patch('src.telegram_handler.get_user_db_path', return_value=temp_db_path), \
+         patch('src.telegram_handler.Bot', return_value=mock_bot), \
+         patch('src.telegram_handler.generate_response', return_value="Got it."), \
+         patch('src.telegram_handler.extract_medication_action', return_value=extraction_result), \
+         patch('src.telegram_handler.log_group_events') as mock_log_group:
+        await handle_message(123, "took my morning meds", 2)
+
+    mock_log_group.assert_called_once_with(temp_db_path, group_id, [med_id], [])
+
+
+@pytest.mark.asyncio
+async def test_none_action_skips_db_writes(mock_settings, temp_db_path):
+    """When extraction returns none, no medication DB writes occur."""
+    mock_bot = MagicMock()
+    mock_bot.send_message = AsyncMock(return_value=MagicMock(message_id=3))
+
+    with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
+         patch('src.telegram_handler.get_user_db_path', return_value=temp_db_path), \
+         patch('src.telegram_handler.Bot', return_value=mock_bot), \
+         patch('src.telegram_handler.generate_response', return_value="Noted."), \
+         patch('src.telegram_handler.extract_medication_action', return_value={"action": "none"}), \
+         patch('src.telegram_handler.log_group_events') as mock_log_group, \
+         patch('src.telegram_handler.log_medication_event') as mock_log_single:
+        await handle_message(123, "I have a headache", 3)
+
+    mock_log_group.assert_not_called()
+    mock_log_single.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_add_medication_action_stages_pending(mock_settings, temp_db_path, caplog):
+    """When extraction returns add_medication, it is staged (not committed), logged."""
+    mock_bot = MagicMock()
+    mock_bot.send_message = AsyncMock(return_value=MagicMock(message_id=4))
+
+    extraction_result = {
+        "action": "add_medication",
+        "name": "metformin",
+        "dosage": "500mg",
+        "type": "scheduled",
+        "group_name": None,
+        "schedule_hour": 8,
+        "schedule_minute": 0,
+    }
+
+    with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
+         patch('src.telegram_handler.get_user_db_path', return_value=temp_db_path), \
+         patch('src.telegram_handler.Bot', return_value=mock_bot), \
+         patch('src.telegram_handler.generate_response', return_value="Got it."), \
+         patch('src.telegram_handler.extract_medication_action', return_value=extraction_result), \
+         patch('src.telegram_handler.log_group_events') as mock_log_group, \
+         caplog.at_level("INFO"):
+        await handle_message(123, "I take metformin 500mg every morning at 8", 4)
+
+    mock_log_group.assert_not_called()
+    assert "staged" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_extraction_failure_does_not_block_response(mock_settings, temp_db_path):
+    """If extraction throws an exception, the user still receives Luigi's response."""
+    mock_bot = MagicMock()
+    mock_sent_message = MagicMock()
+    mock_sent_message.message_id = 5
+    mock_bot.send_message = AsyncMock(return_value=mock_sent_message)
+
+    with patch('src.telegram_handler.get_settings', return_value=mock_settings), \
+         patch('src.telegram_handler.get_user_db_path', return_value=temp_db_path), \
+         patch('src.telegram_handler.Bot', return_value=mock_bot), \
+         patch('src.telegram_handler.generate_response', return_value="Noted."), \
+         patch('src.telegram_handler.extract_medication_action', side_effect=Exception("boom")):
+        response = await handle_message(123, "anything", 5)
+
+    assert response == "Noted."
+    mock_bot.send_message.assert_called_once()

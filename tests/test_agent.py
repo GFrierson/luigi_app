@@ -1,6 +1,11 @@
+import json
 import pytest
 from unittest.mock import patch, MagicMock
-from src.agent import build_messages, generate_response, get_system_prompt, prepare_conversation_history, format_messages_for_context, format_schedule_for_prompt
+from src.agent import (
+    build_messages, generate_response, get_system_prompt, prepare_conversation_history,
+    format_messages_for_context, format_schedule_for_prompt,
+    get_medication_state_context, get_extraction_prompt, extract_medication_action,
+)
 from src.config import Settings
 
 @pytest.fixture
@@ -331,5 +336,117 @@ def test_generate_response_logs_error_on_failure(mock_settings, caplog):
         assert "LLM API call failed" in caplog.text
         # Should return fallback message
         assert response == "The LLM call is failing, I'll try again soon."
+
+
+# ---------------------------------------------------------------------------
+# Medication extraction tests
+# ---------------------------------------------------------------------------
+
+def _make_extraction_mock(response_json: dict, mock_settings):
+    """Helper: returns (mock_openai_class ctx, mock_client) configured to return response_json."""
+    mock_response = MagicMock()
+    mock_choice = MagicMock()
+    mock_message = MagicMock()
+    mock_message.content = json.dumps(response_json)
+    mock_choice.message = mock_message
+    mock_response.choices = [mock_choice]
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_response
+    return mock_client
+
+
+def test_extract_log_group(mock_settings):
+    """extract_medication_action returns log_group action for 'took my morning meds'."""
+    expected = {"action": "log_group", "group_name": "morning meds", "taken": "all", "skipped": []}
+    mock_client = _make_extraction_mock(expected, mock_settings)
+
+    with patch('src.agent.OpenAI', return_value=mock_client), \
+         patch('src.agent.get_settings', return_value=mock_settings):
+        result = extract_medication_action("took my morning meds", "Got it.", "")
+
+    assert result["action"] == "log_group"
+    assert result["group_name"] == "morning meds"
+    assert result["taken"] == "all"
+    assert result["skipped"] == []
+
+
+def test_extract_log_group_with_skip(mock_settings):
+    """extract_medication_action returns log_group with skipped entry."""
+    expected = {"action": "log_group", "group_name": "morning meds", "taken": "rest", "skipped": ["lorazepam"]}
+    mock_client = _make_extraction_mock(expected, mock_settings)
+
+    with patch('src.agent.OpenAI', return_value=mock_client), \
+         patch('src.agent.get_settings', return_value=mock_settings):
+        result = extract_medication_action("took morning meds but skipped lorazepam", "Noted.", "")
+
+    assert result["action"] == "log_group"
+    assert result["skipped"] == ["lorazepam"]
+    assert result["taken"] == "rest"
+
+
+def test_extract_log_single(mock_settings):
+    """extract_medication_action returns log_single for 'just took ibuprofen'."""
+    expected = {"action": "log_single", "medication_name": "ibuprofen", "status": "taken"}
+    mock_client = _make_extraction_mock(expected, mock_settings)
+
+    with patch('src.agent.OpenAI', return_value=mock_client), \
+         patch('src.agent.get_settings', return_value=mock_settings):
+        result = extract_medication_action("just took ibuprofen", "Got it.", "")
+
+    assert result["action"] == "log_single"
+    assert result["medication_name"] == "ibuprofen"
+
+
+def test_extract_add_medication(mock_settings):
+    """extract_medication_action returns add_medication for setup message."""
+    expected = {
+        "action": "add_medication",
+        "name": "metformin",
+        "dosage": "500mg",
+        "type": "scheduled",
+        "group_name": None,
+        "schedule_hour": 8,
+        "schedule_minute": 0,
+    }
+    mock_client = _make_extraction_mock(expected, mock_settings)
+
+    with patch('src.agent.OpenAI', return_value=mock_client), \
+         patch('src.agent.get_settings', return_value=mock_settings):
+        result = extract_medication_action("I take metformin 500mg every morning at 8", "Got it.", "")
+
+    assert result["action"] == "add_medication"
+    assert result["name"] == "metformin"
+
+
+def test_extract_none(mock_settings):
+    """extract_medication_action returns none for non-medication message."""
+    expected = {"action": "none"}
+    mock_client = _make_extraction_mock(expected, mock_settings)
+
+    with patch('src.agent.OpenAI', return_value=mock_client), \
+         patch('src.agent.get_settings', return_value=mock_settings):
+        result = extract_medication_action("I have a headache", "Noted.", "")
+
+    assert result["action"] == "none"
+
+
+def test_extract_malformed_json_returns_none(mock_settings):
+    """extract_medication_action returns none when LLM returns garbage."""
+    mock_response = MagicMock()
+    mock_choice = MagicMock()
+    mock_message = MagicMock()
+    mock_message.content = "This is not JSON at all!!"
+    mock_choice.message = mock_message
+    mock_response.choices = [mock_choice]
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_response
+
+    with patch('src.agent.OpenAI', return_value=mock_client), \
+         patch('src.agent.get_settings', return_value=mock_settings):
+        result = extract_medication_action("anything", "anything", "")
+
+    assert result == {"action": "none"}
 
 

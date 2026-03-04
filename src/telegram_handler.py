@@ -13,8 +13,11 @@ from src.database import (
     get_user_db_path, set_telegram_name, get_display_name, set_preferred_name,
     deactivate_all_schedules, get_all_schedules, add_schedule, remove_schedule,
     update_schedule_time, reactivate_all_schedules,
+    get_all_medications, get_all_active_medication_groups, find_medication_group,
+    get_medications_by_group, log_group_events, get_medication_by_name,
+    log_medication_event,
 )
-from src.agent import generate_response, format_schedule_for_prompt
+from src.agent import generate_response, format_schedule_for_prompt, extract_medication_action, get_medication_state_context
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +182,55 @@ async def _execute_schedule_action(action: ScheduleAction, chat_id: int, db_path
         logger.info(f"Resumed all check-ins for user {chat_id}")
 
 
+def _process_medication_action(action: dict, db_path: str, chat_id: int) -> None:
+    """
+    Dispatch a medication action extracted by Call 2 to the appropriate DB writes.
+    Never raises — all errors are caught and logged.
+    """
+    try:
+        action_type = action.get("action", "none")
+
+        if action_type == "log_group":
+            group_name = action.get("group_name", "")
+            group = find_medication_group(db_path, group_name)
+            if not group:
+                logger.warning(f"log_group: group '{group_name}' not found in DB for chat {chat_id}")
+                return
+            meds = get_medications_by_group(db_path, group['id'])
+            if not meds:
+                logger.debug(f"log_group: no active meds in group '{group_name}'")
+                return
+
+            skipped_names = [n.lower() for n in action.get("skipped", [])]
+            taken_ids = [m['id'] for m in meds if m['name'].lower() not in skipped_names]
+            skipped_ids = [m['id'] for m in meds if m['name'].lower() in skipped_names]
+            log_group_events(db_path, group['id'], taken_ids, skipped_ids)
+            logger.info(f"Logged group event for '{group_name}': {len(taken_ids)} taken, {len(skipped_ids)} skipped")
+
+        elif action_type == "log_single":
+            med_name = action.get("medication_name", "")
+            status = action.get("status", "taken")
+            med = get_medication_by_name(db_path, med_name)
+            if not med:
+                logger.warning(f"log_single: medication '{med_name}' not found for chat {chat_id}")
+                return
+            log_medication_event(db_path, med['id'], status)
+            logger.info(f"Logged single event for '{med_name}': {status}")
+
+        elif action_type in ("add_medication", "create_group", "modify_medication"):
+            # Staging only — not committed to DB yet (pending confirmation flow)
+            logger.info(f"Medication action '{action_type}' staged for chat {chat_id} (pending confirmation)")
+
+        elif action_type == "none":
+            pass
+
+        else:
+            logger.debug(f"Unknown medication action type '{action_type}' for chat {chat_id}")
+
+    except Exception:
+        logger.error(f"_process_medication_action failed for chat {chat_id}", exc_info=True)
+
+
 async def handle_message(chat_id: int, text: str, message_id: int, scheduler=None, telegram_first_name: str = None) -> str:
     """
     Process an incoming message and generate a response.
@@ -252,6 +304,16 @@ async def handle_message(chat_id: int, text: str, message_id: int, scheduler=Non
         sent_id = await send_message(chat_id, response_text)
         insert_message(db_path, 'outbound', response_text, sent_id)
         logger.info(f"Sent response to chat {chat_id} with message ID: {sent_id}")
+
+        # Call 2: extract medication action (best-effort, never blocks response)
+        try:
+            medications = get_all_medications(db_path)
+            groups = get_all_active_medication_groups(db_path)
+            med_state = get_medication_state_context(medications, groups)
+            action = extract_medication_action(text, response_text, med_state)
+            _process_medication_action(action, db_path, chat_id)
+        except Exception:
+            logger.error(f"Medication extraction pipeline failed for chat {chat_id}", exc_info=True)
 
     return response_text
 

@@ -10,6 +10,9 @@ from src.database import (
     set_telegram_name, set_preferred_name, get_display_name,
     get_all_schedules, add_schedule, remove_schedule,
     update_schedule_time, reactivate_all_schedules, MAX_SCHEDULES,
+    create_medication_group, create_medication, get_medications_by_group,
+    get_all_active_medication_groups, find_medication_group, get_all_medications,
+    get_medication_by_name, log_medication_event, log_group_events, deactivate_medication,
 )
 
 @pytest.fixture
@@ -517,3 +520,185 @@ def test_init_db_migration_adds_telegram_name_column(temp_db):
     row = cursor.fetchone()
     conn.close()
     assert row is not None
+
+
+# ---------------------------------------------------------------------------
+# Medication table tests
+# ---------------------------------------------------------------------------
+
+def test_init_db_creates_medication_tables(temp_db):
+    """init_db creates all three medication tables and the index."""
+    init_db(temp_db)
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+
+    for table in ('medication_groups', 'medications', 'medication_events'):
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+        assert cursor.fetchone() is not None, f"Table '{table}' not found"
+
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_medication_events_taken_at'"
+    )
+    assert cursor.fetchone() is not None
+    conn.close()
+
+
+def test_create_medication_group(temp_db):
+    """create_medication_group inserts a group and returns its id."""
+    init_db(temp_db)
+    group_id = create_medication_group(temp_db, "morning meds", "morning,AM meds", 8, 0)
+    assert isinstance(group_id, int) and group_id > 0
+
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, aliases, schedule_hour, schedule_minute FROM medication_groups WHERE id=?", (group_id,))
+    row = cursor.fetchone()
+    conn.close()
+    assert row['name'] == "morning meds"
+    assert row['aliases'] == "morning,AM meds"
+    assert row['schedule_hour'] == 8
+    assert row['schedule_minute'] == 0
+
+
+def test_create_medication_in_group(temp_db):
+    """create_medication with a group_id links the medication to the group."""
+    init_db(temp_db)
+    group_id = create_medication_group(temp_db, "morning meds", None, 8, 0)
+    med_id = create_medication(temp_db, "metformin", "500mg", "scheduled", group_id)
+    assert isinstance(med_id, int) and med_id > 0
+
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, dosage, type, group_id FROM medications WHERE id=?", (med_id,))
+    row = cursor.fetchone()
+    conn.close()
+    assert row['name'] == "metformin"
+    assert row['group_id'] == group_id
+    assert row['type'] == "scheduled"
+
+
+def test_create_as_needed_medication(temp_db):
+    """create_medication with type='as_needed' and no group_id is valid."""
+    init_db(temp_db)
+    med_id = create_medication(temp_db, "ibuprofen", "200mg", "as_needed")
+    assert isinstance(med_id, int) and med_id > 0
+
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT type, group_id FROM medications WHERE id=?", (med_id,))
+    row = cursor.fetchone()
+    conn.close()
+    assert row['type'] == "as_needed"
+    assert row['group_id'] is None
+
+
+def test_log_medication_event_taken(temp_db):
+    """log_medication_event inserts a 'taken' event and returns event id."""
+    init_db(temp_db)
+    med_id = create_medication(temp_db, "metformin", "500mg", "scheduled")
+    event_id = log_medication_event(temp_db, med_id, "taken")
+    assert isinstance(event_id, int) and event_id > 0
+
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT status, source FROM medication_events WHERE id=?", (event_id,))
+    row = cursor.fetchone()
+    conn.close()
+    assert row['status'] == "taken"
+    assert row['source'] == "user"
+
+
+def test_log_medication_event_skipped(temp_db):
+    """log_medication_event inserts a 'skipped' event."""
+    init_db(temp_db)
+    med_id = create_medication(temp_db, "lorazepam", "1mg", "scheduled")
+    event_id = log_medication_event(temp_db, med_id, "skipped", source="reminder", notes="too sleepy")
+    assert event_id > 0
+
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT status, source, notes FROM medication_events WHERE id=?", (event_id,))
+    row = cursor.fetchone()
+    conn.close()
+    assert row['status'] == "skipped"
+    assert row['source'] == "reminder"
+    assert row['notes'] == "too sleepy"
+
+
+def test_get_medications_by_group(temp_db):
+    """get_medications_by_group returns only active meds in the group."""
+    init_db(temp_db)
+    group_id = create_medication_group(temp_db, "morning meds", None, 8, 0)
+    med1 = create_medication(temp_db, "metformin", "500mg", "scheduled", group_id)
+    med2 = create_medication(temp_db, "lisinopril", "10mg", "scheduled", group_id)
+    # Deactivate one
+    deactivate_medication(temp_db, med2)
+
+    meds = get_medications_by_group(temp_db, group_id)
+    assert len(meds) == 1
+    assert meds[0]['id'] == med1
+
+
+def test_get_all_medication_groups(temp_db):
+    """get_all_active_medication_groups returns groups with reminder_active=TRUE."""
+    init_db(temp_db)
+    create_medication_group(temp_db, "morning meds", None, 8, 0)
+    create_medication_group(temp_db, "evening meds", None, 20, 0)
+    # Manually insert an inactive group
+    conn = get_connection(temp_db)
+    conn.execute(
+        "INSERT INTO medication_groups (name, schedule_hour, schedule_minute, reminder_active) VALUES (?, ?, ?, ?)",
+        ("night meds", 22, 0, False)
+    )
+    conn.commit()
+    conn.close()
+
+    groups = get_all_active_medication_groups(temp_db)
+    assert len(groups) == 2
+    names = {g['name'] for g in groups}
+    assert "morning meds" in names
+    assert "evening meds" in names
+    assert "night meds" not in names
+
+
+def test_get_medication_group_by_name_or_alias(temp_db):
+    """find_medication_group matches by name or alias."""
+    init_db(temp_db)
+    group_id = create_medication_group(temp_db, "morning meds", "morning,AM meds", 8, 0)
+
+    # Match by exact name
+    result = find_medication_group(temp_db, "morning meds")
+    assert result is not None
+    assert result['id'] == group_id
+
+    # Match by alias
+    result = find_medication_group(temp_db, "AM meds")
+    assert result is not None
+    assert result['id'] == group_id
+
+    # No match
+    result = find_medication_group(temp_db, "evening meds")
+    assert result is None
+
+
+def test_log_group_event_with_skips(temp_db):
+    """log_group_events creates one row per medication with correct statuses."""
+    init_db(temp_db)
+    group_id = create_medication_group(temp_db, "morning meds", None, 8, 0)
+    med1 = create_medication(temp_db, "metformin", "500mg", "scheduled", group_id)
+    med2 = create_medication(temp_db, "lisinopril", "10mg", "scheduled", group_id)
+    med3 = create_medication(temp_db, "lorazepam", "1mg", "scheduled", group_id)
+
+    event_ids = log_group_events(temp_db, group_id, taken_ids=[med1, med2], skipped_ids=[med3])
+    assert len(event_ids) == 3
+
+    conn = get_connection(temp_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT medication_id, status FROM medication_events ORDER BY id")
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+
+    statuses = {r['medication_id']: r['status'] for r in rows}
+    assert statuses[med1] == "taken"
+    assert statuses[med2] == "taken"
+    assert statuses[med3] == "skipped"
