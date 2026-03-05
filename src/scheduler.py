@@ -5,7 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from src.config import get_settings
 from src.database import (
-    get_active_schedules, get_all_user_databases, insert_message, get_recent_messages,
+    init_db, get_active_schedules, get_all_user_databases, insert_message, get_recent_messages,
     get_display_name, get_all_schedules, get_all_active_medication_groups,
     get_medications_by_group,
 )
@@ -118,6 +118,7 @@ def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
     total_jobs = 0
     total_med_jobs = 0
     for chat_id, db_path in user_databases:
+        init_db(db_path)  # ensure medication tables exist for pre-migration DBs
         total_jobs += schedule_user_check_ins(scheduler, chat_id, db_path)
 
         # Register medication reminder jobs for each active group
