@@ -164,8 +164,12 @@ async def send_scheduled_message(message_template: str, chat_id: int, db_path: s
         recent_context = format_messages_for_context(recent_history)
 
         # Generate contextual check-in using LLM
-        # Use a simple prompt as the "user message" to trigger check-in generation
-        checkin_prompt = [{"direction": "inbound", "body": "This is a scheduled check-in. Generate a brief, contextual greeting."}]
+        # Include current local time so the LLM can generate a time-appropriate greeting
+        from datetime import datetime
+        config = get_settings()
+        now = datetime.now(ZoneInfo(config.TIMEZONE))
+        time_str = now.strftime("%I:%M %p")
+        checkin_prompt = [{"direction": "inbound", "body": f"This is a scheduled check-in at {time_str}. Generate a brief, contextual greeting."}]
 
         response = generate_response(checkin_prompt, user_name, recent_context)
 
