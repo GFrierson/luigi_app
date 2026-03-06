@@ -15,7 +15,7 @@ from src.database import (
     update_schedule_time, reactivate_all_schedules,
     get_all_medications, get_all_active_medication_groups, find_medication_group,
     get_medications_by_group, log_group_events, get_medication_by_name,
-    log_medication_event,
+    log_medication_event, create_medication_group, create_medication,
 )
 from src.agent import generate_response, format_schedule_for_prompt, extract_medication_action, get_medication_state_context
 
@@ -182,7 +182,7 @@ async def _execute_schedule_action(action: ScheduleAction, chat_id: int, db_path
         logger.info(f"Resumed all check-ins for user {chat_id}")
 
 
-def _process_medication_action(action: dict, db_path: str, chat_id: int) -> None:
+def _process_medication_action(action: dict, db_path: str, chat_id: int, scheduler=None) -> None:
     """
     Dispatch a medication action extracted by Call 2 to the appropriate DB writes.
     Never raises — all errors are caught and logged.
@@ -217,9 +217,33 @@ def _process_medication_action(action: dict, db_path: str, chat_id: int) -> None
             log_medication_event(db_path, med['id'], status)
             logger.info(f"Logged single event for '{med_name}': {status}")
 
-        elif action_type in ("add_medication", "create_group", "modify_medication"):
-            # Staging only — not committed to DB yet (pending confirmation flow)
-            logger.info(f"Medication action '{action_type}' staged for chat {chat_id} (pending confirmation)")
+        elif action_type == "create_group":
+            from src.scheduler import register_medication_reminder_job
+            group_name = action.get("name", "")
+            aliases = action.get("aliases")
+            hour = action.get("schedule_hour")
+            minute = action.get("schedule_minute")
+            group_id = create_medication_group(db_path, group_name, aliases, hour, minute)
+            logger.info(f"Created medication group '{group_name}' (id={group_id}) for chat {chat_id}")
+            if hour is not None and minute is not None and scheduler:
+                register_medication_reminder_job(scheduler, chat_id, db_path, group_id, group_name, hour, minute)
+
+        elif action_type == "add_medication":
+            med_name = action.get("name", "")
+            dosage = action.get("dosage")
+            med_type = action.get("type", "scheduled")
+            group_name = action.get("group_name")
+            group_id = None
+            if group_name:
+                group = find_medication_group(db_path, group_name)
+                if group:
+                    group_id = group['id']
+            create_medication(db_path, med_name, dosage, med_type, group_id)
+            logger.info(f"Added medication '{med_name}' to group '{group_name}' for chat {chat_id}")
+
+        elif action_type == "modify_medication":
+            # Not yet implemented
+            logger.info(f"Medication action 'modify_medication' not yet implemented for chat {chat_id}")
 
         elif action_type == "none":
             pass
@@ -287,8 +311,13 @@ async def handle_message(chat_id: int, text: str, message_id: int, scheduler=Non
         all_schedules = await asyncio.to_thread(get_all_schedules, db_path)
         schedule_info = format_schedule_for_prompt(all_schedules)
 
+        # Fetch medication state for the LLM (also used by Call 2 below)
+        medications = get_all_medications(db_path)
+        groups = get_all_active_medication_groups(db_path)
+        med_state = get_medication_state_context(medications, groups)
+
         history = get_recent_messages(db_path, limit=5, hours=24)
-        response_text = generate_response(history, display_name, schedule_info=schedule_info)
+        response_text = generate_response(history, display_name, schedule_info=schedule_info, med_state=med_state)
 
         # Parse preferred name tag from LLM response
         response_text, preferred_name = _extract_preferred_name_tag(response_text)
@@ -307,11 +336,8 @@ async def handle_message(chat_id: int, text: str, message_id: int, scheduler=Non
 
         # Call 2: extract medication action (best-effort, never blocks response)
         try:
-            medications = get_all_medications(db_path)
-            groups = get_all_active_medication_groups(db_path)
-            med_state = get_medication_state_context(medications, groups)
             action = extract_medication_action(text, response_text, med_state)
-            _process_medication_action(action, db_path, chat_id)
+            _process_medication_action(action, db_path, chat_id, scheduler=scheduler)
         except Exception:
             logger.error(f"Medication extraction pipeline failed for chat {chat_id}", exc_info=True)
 

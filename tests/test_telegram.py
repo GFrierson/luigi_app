@@ -336,8 +336,9 @@ async def test_none_action_skips_db_writes(mock_settings, temp_db_path):
 
 
 @pytest.mark.asyncio
-async def test_add_medication_action_stages_pending(mock_settings, temp_db_path, caplog):
-    """When extraction returns add_medication, it is staged (not committed), logged."""
+async def test_add_medication_action_writes_to_db(mock_settings, temp_db_path, caplog):
+    """When extraction returns add_medication, it is written to the DB."""
+    from src.database import get_all_medications
     mock_bot = MagicMock()
     mock_bot.send_message = AsyncMock(return_value=MagicMock(message_id=4))
 
@@ -361,7 +362,9 @@ async def test_add_medication_action_stages_pending(mock_settings, temp_db_path,
         await handle_message(123, "I take metformin 500mg every morning at 8", 4)
 
     mock_log_group.assert_not_called()
-    assert "staged" in caplog.text
+    assert "Added medication 'metformin'" in caplog.text
+    meds = get_all_medications(temp_db_path)
+    assert any(m['name'] == 'metformin' for m in meds)
 
 
 @pytest.mark.asyncio

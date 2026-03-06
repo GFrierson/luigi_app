@@ -25,7 +25,7 @@ def format_schedule_for_prompt(schedules: list[dict]) -> str:
     return f"The user has {count} check-in(s) configured:\n" + "\n".join(lines)
 
 
-def get_system_prompt(user_name: str | None, recent_messages: str | None = None, schedule_info: str | None = None) -> str:
+def get_system_prompt(user_name: str | None, recent_messages: str | None = None, schedule_info: str | None = None, med_state: str | None = None) -> str:
     base_prompt = """You are Luigi, a personal health assistant. Your sole purpose is to RECORD health information, not to give advice.
 
     ## Core Behavior
@@ -94,6 +94,30 @@ def get_system_prompt(user_name: str | None, recent_messages: str | None = None,
     else:
         schedule_context_block = ""
 
+    # Add medication management instructions
+    medication_management_block = """
+    ## Medication Management
+    You can help users track their medications. This is RECORDING, not medical advice.
+
+    What you can do:
+    - Help users add medications they're taking (name, dosage, type)
+    - Help users set up daily reminder groups (e.g. "morning meds at 8am")
+    - Log when they've taken or skipped medications
+    - Confirm what's currently being tracked
+
+    When a user wants to add a medication or set up a reminder, confirm the details naturally.
+    Do NOT suggest which medications to take or change — only record what they tell you.
+    """
+
+    # Add current medication context if available
+    if med_state and med_state != "No medications currently tracked.":
+        medication_context_block = f"""
+    ## Current Medications
+    {med_state}
+    """
+    else:
+        medication_context_block = ""
+
     # Add schedule management instructions
     schedule_management_block = """
     ## Schedule Management
@@ -134,7 +158,7 @@ def get_system_prompt(user_name: str | None, recent_messages: str | None = None,
     You don't have a name for this user yet. Greet them warmly without asking for their name — you'll learn it naturally if they share it.
     """
 
-    return base_prompt + context_block + preferred_name_block + schedule_context_block + schedule_management_block + user_block
+    return base_prompt + context_block + preferred_name_block + schedule_context_block + schedule_management_block + medication_management_block + medication_context_block + user_block
 
 
 def format_messages_for_context(messages: List[Dict]) -> str:
@@ -168,7 +192,7 @@ def prepare_conversation_history(conversation_history: List[Dict]) -> List[Dict]
     logger.debug(f"Prepared {len(filtered_history)} messages from {len(conversation_history)} available")
     return filtered_history
 
-def build_messages(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None, schedule_info: Optional[str] = None) -> List[Dict]:
+def build_messages(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None, schedule_info: Optional[str] = None, med_state: Optional[str] = None) -> List[Dict]:
     """
     Convert conversation history into OpenAI message format.
 
@@ -177,6 +201,7 @@ def build_messages(conversation_history: List[Dict], user_name: Optional[str] = 
         user_name: Optional user name for personalization
         recent_messages: Optional formatted recent message context for scheduled check-ins
         schedule_info: Optional formatted schedule context for schedule management
+        med_state: Optional formatted medication state context
 
     Returns:
         List of message dicts in OpenAI format with 'role' and 'content'
@@ -184,7 +209,7 @@ def build_messages(conversation_history: List[Dict], user_name: Optional[str] = 
     # First, prepare the history according to ADR rules
     prepared_history = prepare_conversation_history(conversation_history)
 
-    messages = [{"role": "system", "content": get_system_prompt(user_name, recent_messages, schedule_info)}]
+    messages = [{"role": "system", "content": get_system_prompt(user_name, recent_messages, schedule_info, med_state)}]
     
     for message in prepared_history:
         if message['direction'] == 'inbound':
@@ -203,7 +228,7 @@ def build_messages(conversation_history: List[Dict], user_name: Optional[str] = 
     logger.debug(f"Built {len(messages)} messages for LLM")
     return messages
 
-def generate_response(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None, schedule_info: Optional[str] = None) -> str:
+def generate_response(conversation_history: List[Dict], user_name: Optional[str] = None, recent_messages: Optional[str] = None, schedule_info: Optional[str] = None, med_state: Optional[str] = None) -> str:
     """
     Generate a response using the LLM.
 
@@ -212,6 +237,7 @@ def generate_response(conversation_history: List[Dict], user_name: Optional[str]
         user_name: Optional user name for personalization
         recent_messages: Optional formatted recent message context for scheduled check-ins
         schedule_info: Optional formatted schedule context for schedule management
+        med_state: Optional formatted medication state context
 
     Returns:
         LLM response string or fallback message on error
@@ -225,7 +251,7 @@ def generate_response(conversation_history: List[Dict], user_name: Optional[str]
         )
 
         # Build messages for the LLM
-        messages = build_messages(conversation_history, user_name, recent_messages, schedule_info)
+        messages = build_messages(conversation_history, user_name, recent_messages, schedule_info, med_state)
         
         logger.debug(f"Sending request to LLM with model: {config.LLM_MODEL}")
         logger.debug(f"Messages: {messages}")

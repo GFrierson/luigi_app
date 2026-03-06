@@ -76,6 +76,36 @@ def schedule_user_check_ins(scheduler: AsyncIOScheduler, chat_id: int, db_path: 
     return len(schedules)
 
 
+def register_medication_reminder_job(
+    scheduler: AsyncIOScheduler,
+    chat_id: int,
+    db_path: str,
+    group_id: int,
+    group_name: str,
+    hour: int,
+    minute: int,
+    interval_days: int = 1,
+    start_date: str | None = None,
+) -> None:
+    """Register a medication reminder cron job for a single group."""
+    config = get_settings()
+    job_id = f"med_reminder_{chat_id}_{group_id}"
+    trigger = CronTrigger(
+        hour=hour,
+        minute=minute,
+        timezone=ZoneInfo(config.TIMEZONE),
+    )
+    scheduler.add_job(
+        send_medication_reminder,
+        trigger,
+        args=[group_name, chat_id, db_path, group_id, interval_days, start_date],
+        id=job_id,
+        name=f"Med reminder for {chat_id}: {group_name}",
+        replace_existing=True,
+    )
+    logger.info(f"Registered med reminder job '{job_id}' for '{group_name}'")
+
+
 async def send_medication_reminder(group_name: str, chat_id: int, db_path: str, group_id: int, interval_days: int, start_date: str | None) -> None:
     """
     Send a medication reminder for a group.
@@ -126,22 +156,12 @@ def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
         for group in groups:
             if group.get('schedule_hour') is None or group.get('schedule_minute') is None:
                 continue
-            job_id = f"med_reminder_{chat_id}_{group['id']}"
-            trigger = CronTrigger(
-                hour=group['schedule_hour'],
-                minute=group['schedule_minute'],
-                timezone=ZoneInfo(config.TIMEZONE),
-            )
-            scheduler.add_job(
-                send_medication_reminder,
-                trigger,
-                args=[group['name'], chat_id, db_path, group['id'], group.get('interval_days', 1), group.get('start_date')],
-                id=job_id,
-                name=f"Med reminder for {chat_id}: {group['name']}",
-                replace_existing=True,
+            register_medication_reminder_job(
+                scheduler, chat_id, db_path, group['id'], group['name'],
+                group['schedule_hour'], group['schedule_minute'],
+                group.get('interval_days', 1), group.get('start_date'),
             )
             total_med_jobs += 1
-            logger.info(f"Registered med reminder job '{job_id}' for '{group['name']}'")
 
     logger.info(f"Total scheduled check-ins: {total_jobs} for {len(user_databases)} users")
     logger.info(f"Total medication reminder jobs: {total_med_jobs}")
