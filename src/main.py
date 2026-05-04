@@ -26,7 +26,7 @@ def main():
     logger.info(f"Database directory: {config.DATABASE_DIR}")
 
     scheduler = create_scheduler()
-    schedule_check_ins(scheduler)
+    # schedule_check_ins(scheduler)  # disabled: respond-only mode
 
     async def post_init(app: Application) -> None:
         scheduler.start()
