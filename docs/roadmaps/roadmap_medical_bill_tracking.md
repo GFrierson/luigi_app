@@ -45,12 +45,46 @@ Phase 1 adds the core billing schema (10 new tables) to each user's SQLite DB vi
 ## Phase 2: Claims & Adjudication Lifecycle
 **What's true when this is done:** Can represent the Sep 23 Siefferman claim with its 11/06 EOB adjudication and the 8/27 Mikaberidze re-adjudication with full event history. Can find a claim by `(service_date, billing_practice_id, billed_amount)`.
 
-- [ ] Add tables: `claims`, `claim_external_ids`, `claim_events`, `charges`, `adjudications`
-- [ ] Write `src/medical/claims.py` with `create_claim`, `add_external_id`, `find_by_match_key`
-- [ ] Implement adjudication revision logic: insert new revision + mark prior superseded + append event
-- [ ] Implement `claim_events` append-only log with JSON payload by event_type (serialize via `json.dumps()` and bind as parameterized `?` — never interpolate into SQL)
-- [ ] Update `current_status` denormalization on event insert
-- [ ] Write tests for create→adjudicate→re-adjudicate sequence, external ID lookup, match-key lookup
+- [x] Add tables: `claims`, `claim_external_ids`, `claim_events`, `charges`, `adjudications`
+- [x] Write `src/medical/claims.py` with `create_claim`, `add_external_id`, `find_by_match_key`
+- [x] Implement adjudication revision logic: insert new revision + mark prior superseded + append event
+- [x] Implement `claim_events` append-only log with JSON payload by event_type (serialize via `json.dumps()` and bind as parameterized `?` — never interpolate into SQL)
+- [x] Update `current_status` denormalization on event insert
+- [x] Write tests for create→adjudicate→re-adjudicate sequence, external ID lookup, match-key lookup
+
+### Handoff — Phase 2
+**Completed:** 2026-05-05
+**Branch:** main
+**Tests:** pytest tests/ -x -q — 156 passed
+
+#### What was built
+Phase 2 adds the claims and adjudication lifecycle: 5 new tables (`claims`, `claim_external_ids`, `charges`, `adjudications`, `claim_events`) via idempotent `init_db()` migrations, and a new module `src/medical/claims.py` with 7 functions covering claim creation, external ID management, match-key/external-ID lookup, and a fully atomic `adjudicate_claim` that handles initial adjudication and re-adjudications with a `superseded_by` chain and append-only event journaling.
+
+#### Files changed
+- `src/database.py` — 5 new `CREATE TABLE IF NOT EXISTS` blocks in `init_db()` after Phase 1 tables, all with `claim_id NOT NULL` and proper FK ordering
+- `src/medical/claims.py` — new module: `_append_event`, `create_claim`, `add_external_id`, `find_by_match_key`, `find_by_external_id`, `adjudicate_claim`, `get_claim_events`
+- `tests/test_medical_claims.py` — 14 tests covering create, duplicate rejection, event log, external ID CRUD, match-key lookup (exact + off-by-one), first adjudication, 2-revision re-adjudication, 3-revision superseded chain, event ordering
+
+#### How to verify manually
+1. `pytest tests/test_medical_claims.py -v` — all 14 tests pass
+2. Python REPL sequence:
+   ```python
+   from src.database import init_db
+   from src.medical.entities import create_practice
+   from src.medical.claims import *
+   init_db("test.db")
+   p = create_practice("test.db", "Manhattan Pain Medicine")
+   c = create_claim("test.db", "2025-09-23", p["id"], 250.00)
+   adjudicate_claim("test.db", c["id"], "2025-11-06", 200.00, 160.00, 40.00)
+   adjudicate_claim("test.db", c["id"], "2025-08-27", 210.00, 168.00, 42.00)
+   get_claim_events("test.db", c["id"])  # → 3 events: created, adjudicated, readjudicated
+   find_by_match_key("test.db", "2025-09-23", p["id"], 250.00)  # → current_status: 'readjudicated'
+   ```
+
+#### Open questions / deferred decisions
+- `charges` table is created but has no CRUD helpers yet — deferred to Phase 3 or whenever line-item charges need to be surfaced in queries.
+- `billed_amount NOT NULL` constraint means claims with unknown billed amounts cannot be inserted. If this edge case arises before Phase 4 ingestion, add a `0.0` default sentinel or lift the constraint and add a NULL guard in `find_by_match_key`.
+- The `adjudicate_claim` rollback wraps `conn.rollback()` in its own try/except to avoid masking the original error — this pattern should be replicated in any future multi-step DB transactions.
 
 ## Phase 3: Documents + Payments
 **What's true when this is done:** PDF stored on disk, linked polymorphically to claim/encounter/procedure. Payments recorded with direction. The query "what does Shanelle owe Manhattan Pain Medicine?" returns $4,501.50 for the Sep 23 Siefferman claim plus a $5,275.50 member-held amount surfaced separately.

@@ -248,6 +248,67 @@ def init_db(db_path: str) -> None:
         )
     """)
 
+    # --- Medical billing (Phase 2) ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_date DATE NOT NULL,
+            billing_practice_id INTEGER NOT NULL REFERENCES practices(id),
+            encounter_id INTEGER REFERENCES encounters(id),
+            insurer_id INTEGER REFERENCES insurers(id),
+            billed_amount REAL NOT NULL,
+            current_status TEXT NOT NULL DEFAULT 'submitted'
+                CHECK (current_status IN ('submitted','adjudicated','readjudicated','denied','void')),
+            UNIQUE(service_date, billing_practice_id, billed_amount)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS claim_external_ids (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            claim_id INTEGER NOT NULL REFERENCES claims(id),
+            system TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            UNIQUE(system, external_id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS charges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            claim_id INTEGER NOT NULL REFERENCES claims(id),
+            procedure_id INTEGER REFERENCES procedures(id),
+            cpt_code TEXT REFERENCES cpt_codes(code),
+            billed_amount REAL,
+            notes TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS adjudications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            claim_id INTEGER NOT NULL REFERENCES claims(id),
+            adjudication_date DATE NOT NULL,
+            allowed_amount REAL,
+            plan_paid REAL,
+            member_owed REAL,
+            paid_to_member REAL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            superseded_by INTEGER REFERENCES adjudications(id),
+            notes TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS claim_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            claim_id INTEGER NOT NULL REFERENCES claims(id),
+            event_type TEXT NOT NULL CHECK (event_type IN ('created','adjudicated','readjudicated','status_changed','external_id_added')),
+            payload TEXT,
+            occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
     logger.info("Database tables created/verified")
