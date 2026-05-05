@@ -12,6 +12,7 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     """Get a SQLite database connection."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row  # Return rows as dict-like objects
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 def get_user_db_path(database_dir: str, chat_id: int) -> str:
@@ -160,6 +161,91 @@ def init_db(db_path: str) -> None:
     # Insert default profile row if not exists
     cursor.execute("""
         INSERT OR IGNORE INTO user_profile (id, name) VALUES (1, NULL)
+    """)
+
+    # Medical billing entities (Phase 1)
+    # NOTE: practices must be created before claims (Phase 2) — claims.billing_practice_id FKs here
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS insurers (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cpt_codes (
+            code        TEXT PRIMARY KEY,
+            description TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS icd_codes (
+            code        TEXT PRIMARY KEY,
+            description TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS practices (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS practice_aliases (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            practice_id INTEGER NOT NULL REFERENCES practices(id),
+            alias       TEXT    NOT NULL,
+            UNIQUE(alias)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS providers (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS provider_aliases (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER NOT NULL REFERENCES providers(id),
+            alias       TEXT    NOT NULL,
+            UNIQUE(alias)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS provider_practice_affiliations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id INTEGER NOT NULL REFERENCES providers(id),
+            practice_id INTEGER NOT NULL REFERENCES practices(id),
+            UNIQUE(provider_id, practice_id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS encounters (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_date DATE    NOT NULL,
+            practice_id  INTEGER NOT NULL REFERENCES practices(id),
+            provider_id  INTEGER REFERENCES providers(id),
+            notes        TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS procedures (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            encounter_id  INTEGER NOT NULL REFERENCES encounters(id),
+            cpt_code      TEXT    REFERENCES cpt_codes(code),
+            icd_code      TEXT    REFERENCES icd_codes(code),
+            billed_amount REAL,
+            notes         TEXT
+        )
     """)
 
     conn.commit()

@@ -8,12 +8,39 @@
 ## Phase 1: Core Entities + Code Lookups
 **What's true when this is done:** Can manually create an encounter at a practice with multiple providers and procedures coded to CPT/ICD. Aliases resolve "Manhattan Pain Medicine" and "Dr. Deborah Barbiere Psy.D., L.Ac." to the same practice.
 
-- [ ] Add tables to `data/{chat_id}.db`: `practices`, `practice_aliases`, `providers`, `provider_aliases`, `provider_practice_affiliations`, `insurers`
-- [ ] Add tables: `encounters`, `procedures`, `cpt_codes`, `icd_codes`
-- [ ] Download HCPCS/CPT data from CMS, load into `cpt_codes` (one-time seed script in `src/medical/scripts/`)
-- [ ] Download ICD-10-CM data from CMS, load into `icd_codes` (one-time seed script in `src/medical/scripts/`)
-- [ ] Write `src/medical/entities.py` with CRUD + alias-resolve helpers
-- [ ] Write tests for alias resolution, affiliation queries, encounter+procedure creation
+- [x] Add tables to `data/{chat_id}.db`: `practices`, `practice_aliases`, `providers`, `provider_aliases`, `provider_practice_affiliations`, `insurers`
+- [x] Add tables: `encounters`, `procedures`, `cpt_codes`, `icd_codes`
+- [x] Download HCPCS/CPT data from CMS, load into `cpt_codes` (one-time seed script in `src/medical/scripts/`)
+- [x] Download ICD-10-CM data from CMS, load into `icd_codes` (one-time seed script in `src/medical/scripts/`)
+- [x] Write `src/medical/entities.py` with CRUD + alias-resolve helpers
+- [x] Write tests for alias resolution, affiliation queries, encounter+procedure creation
+
+### Handoff — Phase 1
+**Completed:** 2026-05-05
+**Branch:** main
+**Tests:** pytest tests/ -x -q — 142 passed
+
+#### What was built
+Phase 1 adds the core billing schema (10 new tables) to each user's SQLite DB via idempotent `init_db()` migrations, along with a CRUD + alias-resolution module (`src/medical/entities.py`) and two stdlib-only seed scripts for loading CMS CPT/HCPCS and ICD-10-CM code data. Foreign key enforcement (`PRAGMA foreign_keys = ON`) was also added to `get_connection()`, hardening the entire DB layer.
+
+#### Files changed
+- `src/database.py` — `PRAGMA foreign_keys = ON` in `get_connection()`; 10 new `CREATE TABLE IF NOT EXISTS` blocks in `init_db()` with FK-ordering comment for Phase 2's `claims` table
+- `src/medical/__init__.py` — empty package marker
+- `src/medical/scripts/__init__.py` — empty package marker
+- `src/medical/entities.py` — 12 functions: practice/provider CRUD, alias resolution (`resolve_practice`, `resolve_provider`, `resolve_entity_to_practice`), affiliation helpers, encounter + procedure creation
+- `src/medical/scripts/seed_cpt_codes.py` — CLI seed script for CMS HCPCS data; `--db-path` + optional `--source-url`
+- `src/medical/scripts/seed_icd_codes.py` — CLI seed script for CMS ICD-10-CM data; same interface
+- `tests/test_medical_entities.py` — 14 tests covering schema creation, CRUD, alias resolution, provider→practice resolution via affiliation, encounter/procedure linking
+
+#### How to verify manually
+1. `pytest tests/test_medical_entities.py -v` — all 14 tests pass
+2. Python REPL: `from src.database import init_db; from src.medical.entities import *; init_db("test.db"); p = create_practice("test.db", "Manhattan Pain Medicine"); add_practice_alias("test.db", p["id"], "MPM"); resolve_entity_to_practice("test.db", "MPM")` — should return the practice row
+3. `resolve_entity_to_practice` via provider name: create provider, affiliate to practice, resolve by provider name — returns practice dict
+
+#### Open questions / deferred decisions
+- Seed script URLs point to 2024 CMS releases (best-effort); verify current URLs before running in production. Use `--source-url` to override.
+- `PRAGMA foreign_keys = ON` is now active on every connection — a real-user DB with orphaned rows (unlikely, but possible) would surface new integrity errors on next access. Worth a dry-run on a copy of a live DB before deploying.
+- Phase 2's `claims` table must be added after `practices` in `init_db()` — the comment is in place.
 
 ## Phase 2: Claims & Adjudication Lifecycle
 **What's true when this is done:** Can represent the Sep 23 Siefferman claim with its 11/06 EOB adjudication and the 8/27 Mikaberidze re-adjudication with full event history. Can find a claim by `(service_date, billing_practice_id, billed_amount)`.
