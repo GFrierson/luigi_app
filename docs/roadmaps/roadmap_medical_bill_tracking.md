@@ -89,12 +89,37 @@ Phase 2 adds the claims and adjudication lifecycle: 5 new tables (`claims`, `cla
 ## Phase 3: Documents + Payments
 **What's true when this is done:** PDF stored on disk, linked polymorphically to claim/encounter/procedure. Payments recorded with direction. The query "what does Shanelle owe Manhattan Pain Medicine?" returns $4,501.50 for the Sep 23 Siefferman claim plus a $5,275.50 member-held amount surfaced separately.
 
-- [ ] Add tables: `documents`, `document_links`, `payments`, `payment_applications`
-- [ ] Implement filesystem layout `data/{chat_id}/documents/yyyy/mm/` + `save_document` helper
-- [ ] Write polymorphic linking helpers: `attach_document`, `list_documents_for_entity`
-- [ ] Write payment recording with `from_party`/`to_party` + `payment_applications`
-- [ ] Build SQL views: `v_claim_obligation`, `v_member_holds`, `v_encounter_balance`
-- [ ] Manually populate Sep 23 Siefferman + Mikaberidze claims from the EOB/statement PDFs as fixture; verify all three queries return expected amounts
+- [x] Add tables: `documents`, `document_links`, `payments`, `payment_applications`
+- [x] Implement filesystem layout `data/{chat_id}/documents/yyyy/mm/` + `save_document` helper
+- [x] Write polymorphic linking helpers: `attach_document`, `list_documents_for_entity`
+- [x] Write payment recording with `from_party`/`to_party` + `payment_applications`
+- [x] Build SQL views: `v_claim_obligation`, `v_member_holds`, `v_encounter_balance`
+- [x] Manually populate Sep 23 Siefferman + Mikaberidze claims from the EOB/statement PDFs as fixture; verify all three queries return expected amounts
+
+### Handoff — Phase 3
+**Completed:** 2026-05-06
+**Branch:** main
+**Tests:** pytest tests/ -x -q — 173 passed
+
+#### What was built
+Phase 3 adds document storage (filesystem + DB), polymorphic document linking, payment recording and application, and three SQL views that compute net member obligation, member-held insurer payments, and per-encounter balance rollups. A fixture seed script hard-codes the Sep 23 Siefferman and Mikaberidze claim data to verify the views return the expected headline figures.
+
+#### Files changed
+- `src/database.py` — 4 new tables (`documents`, `document_links`, `payments`, `payment_applications`) + 3 views (`v_claim_obligation`, `v_member_holds`, `v_encounter_balance`) added to `init_db()`, all idempotent via `IF NOT EXISTS`
+- `src/medical/documents.py` — new module: `_resolve_document_path` (yyyy/mm + uuid8 suffix to prevent filename collisions), `save_document`, `attach_document`, `list_documents_for_entity`
+- `src/medical/payments.py` — new module: `record_payment`, `apply_payment`, `get_payment_applications` (joined to parent payment row)
+- `src/medical/scripts/seed_sep23_fixture.py` — CLI seed script (`--db-path`); hard-coded literals for Sep 23 Siefferman ($4,501.50 net obligation) and Mikaberidze ($5,275.50 member-held); prints all three views; idempotent on claims via `find_by_match_key`
+- `tests/test_medical_documents.py` — 17 new tests including four review-mandated bug-catchers: submitted-claim visibility in `v_claim_obligation`, GROUP-BY stability across re-adjudications, filename collision prevention, and multi-claim encounter balance
+
+#### How to verify manually
+1. `pytest tests/test_medical_documents.py -v` — all 17 tests pass
+2. `python -m src.medical.scripts.seed_sep23_fixture --db-path /tmp/luigi_p3_demo.db` — prints v_claim_obligation, v_member_holds, v_encounter_balance; Siefferman row shows `net_obligation=4501.5`, Mikaberidze row shows a `v_member_holds` entry of `held_amount=5275.5`
+
+#### Open questions / deferred decisions
+- Sep 23 fixture dollar amounts are reasoned literals; Phase 4 PDF extraction will reconcile them against source EOBs — update the seed script then.
+- The seed script is idempotent on claims but NOT on adjudications; re-running on a populated DB appends extra `superseded_by` chain entries. Reset by deleting the DB.
+- `documents_dir` is a parameter to `save_document` for now; Phase 4 will wire it to a `settings.documents_dir` config value alongside `settings.database_dir`.
+- `document_links.entity_id` has no SQL FK (polymorphic table); application code must validate referenced entity existence.
 
 ## Phase 4: Telegram Ingestion + Confirmation Flow
 **What's true when this is done:** Forward an EOB PDF to Luigi, get a batched confirmation message listing extracted entities and proposed links, reply "confirm" or with corrections, see data persisted. All three Sep 23 PDFs route end-to-end correctly.

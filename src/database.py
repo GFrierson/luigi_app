@@ -309,6 +309,123 @@ def init_db(db_path: str) -> None:
         )
     """)
 
+    # --- Medical billing (Phase 3) ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id       INTEGER NOT NULL,
+            file_path     TEXT    NOT NULL,
+            original_name TEXT,
+            mime_type     TEXT,
+            doc_type      TEXT    NOT NULL CHECK (doc_type IN ('eob','statement','receipt','other')),
+            document_date DATE,
+            notes         TEXT,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # document_links: polymorphic — entity_type is constrained by CHECK,
+    # entity_id is NOT a SQL FK (would have to vary per entity_type). Mirrors
+    # the claim_events.event_type CHECK pattern.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS document_links (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id   INTEGER NOT NULL REFERENCES documents(id),
+            entity_type   TEXT    NOT NULL CHECK (entity_type IN ('claim','encounter','procedure','adjudication')),
+            entity_id     INTEGER NOT NULL,
+            UNIQUE(document_id, entity_type, entity_id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            payment_date  DATE    NOT NULL,
+            amount        REAL    NOT NULL,
+            from_party    TEXT    NOT NULL CHECK (from_party IN ('insurer','member','hsa','fsa','practice')),
+            to_party      TEXT    NOT NULL CHECK (to_party IN ('insurer','member','hsa','fsa','practice')),
+            method        TEXT,
+            reference     TEXT,
+            notes         TEXT,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payment_applications (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            payment_id     INTEGER NOT NULL REFERENCES payments(id),
+            claim_id       INTEGER NOT NULL REFERENCES claims(id),
+            applied_amount REAL    NOT NULL,
+            UNIQUE(payment_id, claim_id)
+        )
+    """)
+
+    # --- Medical billing views (Phase 3) ---
+    # v_claim_obligation: net amount the member still owes the practice for each claim.
+    # - LEFT JOIN adjudications + filter to a.superseded_by IS NULL so unadjudicated
+    #   claims still appear (member_owed = 0) and only the current adjudication is used.
+    # - Sum only payments member→practice toward payments_applied (insurer→member
+    #   transfers are tracked separately in v_member_holds).
+    cursor.execute("""
+        CREATE VIEW IF NOT EXISTS v_claim_obligation AS
+        SELECT
+            c.id                                        AS claim_id,
+            c.service_date                              AS service_date,
+            c.billing_practice_id                       AS billing_practice_id,
+            c.billed_amount                             AS billed_amount,
+            COALESCE(a.member_owed, 0.0)                AS member_owed,
+            COALESCE(
+                SUM(CASE
+                    WHEN p.from_party = 'member' AND p.to_party = 'practice'
+                    THEN pa.applied_amount ELSE 0
+                END), 0.0
+            )                                           AS payments_applied,
+            COALESCE(a.member_owed, 0.0)
+                - COALESCE(
+                    SUM(CASE
+                        WHEN p.from_party = 'member' AND p.to_party = 'practice'
+                        THEN pa.applied_amount ELSE 0
+                    END), 0.0
+                )                                       AS net_obligation
+        FROM claims c
+        LEFT JOIN adjudications a
+            ON a.claim_id = c.id AND a.superseded_by IS NULL
+        LEFT JOIN payment_applications pa ON pa.claim_id = c.id
+        LEFT JOIN payments p ON p.id = pa.payment_id
+        GROUP BY c.id, a.id
+    """)
+
+    # v_member_holds: insurer→member payments — money the insurer paid to the
+    # member that should be forwarded on to a practice.
+    cursor.execute("""
+        CREATE VIEW IF NOT EXISTS v_member_holds AS
+        SELECT
+            pa.claim_id                                    AS claim_id,
+            p.id                                           AS payment_id,
+            p.payment_date                                 AS payment_date,
+            p.amount                                       AS held_amount,
+            julianday('now') - julianday(p.payment_date)   AS days_held
+        FROM payments p
+        JOIN payment_applications pa ON pa.payment_id = p.id
+        WHERE p.from_party = 'insurer'
+          AND p.to_party   = 'member'
+    """)
+
+    # v_encounter_balance: rolls up net_obligation across all claims for an encounter.
+    cursor.execute("""
+        CREATE VIEW IF NOT EXISTS v_encounter_balance AS
+        SELECT
+            e.id                   AS encounter_id,
+            e.service_date         AS service_date,
+            e.practice_id          AS practice_id,
+            SUM(vc.net_obligation) AS total_net_obligation
+        FROM encounters e
+        JOIN claims c ON c.encounter_id = e.id
+        JOIN v_claim_obligation vc ON vc.claim_id = c.id
+        GROUP BY e.id
+    """)
+
     conn.commit()
     conn.close()
     logger.info("Database tables created/verified")
