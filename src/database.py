@@ -209,6 +209,11 @@ def init_db(db_path: str) -> None:
         )
     """)
 
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_providers_name "
+        "ON providers(name)"
+    )
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS provider_aliases (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,

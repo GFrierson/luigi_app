@@ -136,7 +136,8 @@ def resolve_practice(db_path: str, query: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def create_provider(db_path: str, name: str) -> Optional[dict]:
-    """Insert a new provider. Returns the created row dict, or None on failure."""
+    """Insert a new provider. Returns the created row dict, or None on failure
+    or when a provider with the same name already exists (UNIQUE name index)."""
     conn = get_connection(db_path)
     try:
         cursor = conn.cursor()
@@ -153,6 +154,9 @@ def create_provider(db_path: str, name: str) -> Optional[dict]:
         row = cursor.fetchone()
         logger.info(f"Created provider id={provider_id} name='{name}'")
         return dict(row) if row else None
+    except sqlite3.IntegrityError:
+        logger.debug(f"Duplicate provider name='{name}', skipping")
+        return None
     except Exception:
         logger.error(f"Failed to create provider name='{name}'", exc_info=True)
         return None
@@ -430,6 +434,55 @@ def find_encounter_by_date_and_practice(
     except Exception:
         logger.error(
             f"Failed to find encounter service_date={service_date} practice_id={practice_id}",
+            exc_info=True,
+        )
+        return None
+    finally:
+        conn.close()
+
+
+def set_encounter_provider(
+    db_path: str,
+    encounter_id: int,
+    provider_id: int,
+) -> Optional[bool]:
+    """
+    Set encounters.provider_id when it is currently NULL — never overwrite a
+    previously-set provider.
+
+    Returns:
+        True  — the encounter was updated.
+        False — the encounter already had a provider_id set (no-op).
+        None  — the call failed (logged with exc_info).
+    """
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE encounters
+            SET provider_id = ?
+            WHERE id = ? AND provider_id IS NULL
+            """,
+            (provider_id, encounter_id),
+        )
+        rowcount = cursor.rowcount
+        conn.commit()
+        if rowcount == 1:
+            logger.info(
+                f"Set encounter.provider_id encounter_id={encounter_id} "
+                f"provider_id={provider_id}"
+            )
+            return True
+        logger.debug(
+            f"set_encounter_provider no-op: encounter_id={encounter_id} "
+            f"already has a provider_id (or does not exist)"
+        )
+        return False
+    except Exception:
+        logger.error(
+            f"Failed to set encounter provider encounter_id={encounter_id} "
+            f"provider_id={provider_id}",
             exc_info=True,
         )
         return None

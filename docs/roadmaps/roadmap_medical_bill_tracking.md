@@ -229,10 +229,34 @@ Phase 6 closes the gap between claim ingestion and encounter tracking. When `com
 ## Phase 7: Auto-Link Provider from EOB
 **What's true when this is done:** When an EOB names a rendering provider, Luigi matches or creates that provider and links them to the encounter stub created in Phase 6. The provider appears in the encounter record without manual entry.
 
-- [ ] Extend `ExtractionResult` / `ExtractedProvider` schema in `src/medical/extraction.py` to capture the rendering provider name per claim (if present in the EOB)
-- [ ] In `commit_ingestion`: after resolving the encounter, match or create the provider (`match_provider` → `create_provider`), then update `encounters.provider_id` via a new `set_encounter_provider(db_path, encounter_id, provider_id)` helper in `entities.py`
-- [ ] Only set provider if the encounter's `provider_id` is currently NULL — never overwrite a manually-set provider
-- [ ] Write tests: EOB with provider name sets encounter.provider_id; second EOB with different provider does not overwrite; EOB with no provider leaves provider_id NULL
+- [x] Extend `ExtractionResult` / `ExtractedProvider` schema in `src/medical/extraction.py` to capture the rendering provider name per claim (if present in the EOB)
+- [x] In `commit_ingestion`: after resolving the encounter, match or create the provider (`match_provider` → `create_provider`), then update `encounters.provider_id` via a new `set_encounter_provider(db_path, encounter_id, provider_id)` helper in `entities.py`
+- [x] Only set provider if the encounter's `provider_id` is currently NULL — never overwrite a manually-set provider
+- [x] Write tests: EOB with provider name sets encounter.provider_id; second EOB with different provider does not overwrite; EOB with no provider leaves provider_id NULL
+
+### Handoff — Phase 7
+**Completed:** 2026-05-07
+**Branch:** main
+**Tests:** pytest tests/ -x -q — 212 passed (208 prior + 4 new)
+
+#### What was built
+Phase 7 closes the provider-linking gap in EOB ingestion. When `commit_ingestion` creates a new claim whose extracted `provider_name` is non-empty, it now runs `match_provider` → `create_provider` (fallback) and calls the new `set_encounter_provider` helper, which runs a guarded `UPDATE encounters SET provider_id = ? WHERE id = ? AND provider_id IS NULL`. A UNIQUE index on `providers.name` and an `IntegrityError` guard in `create_provider` make the match-or-create idempotent across repeated EOB ingestions. The note in Phase 7's roadmap checkbox about "extending the extraction schema" was already done in Phase 4 — `ExtractedClaim.provider_name` existed and the EOB prompt already requested it.
+
+#### Files changed
+- `src/database.py` — `CREATE UNIQUE INDEX IF NOT EXISTS idx_providers_name ON providers(name)` added after the `providers` table, mirroring the Phase-6 encounters-index pattern
+- `src/medical/entities.py` — `create_provider` now catches `sqlite3.IntegrityError` on duplicate name and returns `None` with `logger.debug`; new `set_encounter_provider(db_path, encounter_id, provider_id) -> Optional[bool]` returns `True`/`False`/`None` for updated / already-set / error
+- `src/medical/ingestion.py` — `set_encounter_provider` added to entity imports; in `commit_ingestion`'s new-claim branch, after encounter resolution, links rendering provider via `match_provider` → `create_provider` fallback, wrapped in `asyncio.to_thread`; branches explicitly on all three return values; best-effort (logs and continues on failure)
+- `tests/test_medical_ingestion.py` — `_make_pending` extended with optional `provider_name`; added `create_provider` import; 4 new tests covering: provider-name sets encounter.provider_id, second EOB with different provider does not overwrite (with guard assertion), no provider_name leaves provider_id NULL, matching existing provider creates no duplicate row
+
+#### How to verify manually
+1. `pytest tests/test_medical_ingestion.py -v` — 7 tests pass
+2. Python REPL: `init_db("test.db")`; create a practice; build an `ExtractionResult` with one claim where `provider_name="Dr. Smith"`; call `await commit_ingestion("test.db", 12345, pending)`; verify `find_encounter_by_date_and_practice` returns a row with `provider_id` populated and a `providers` row exists for "Dr. Smith"
+3. Run `commit_ingestion` again with the same practice/date but `provider_name="Dr. Jones"` and a different `billed_amount` — confirm encounter's `provider_id` remains "Dr. Smith"'s ID
+
+#### Open questions / deferred decisions
+- The new UNIQUE index on `providers.name` will reject duplicates on live DBs that contain duplicate provider names. A one-time dedup script may be needed before deploying against a populated DB — same caveat as Phase 6's encounters index.
+- Provider linking is best-effort: if `encounter` is `None` (encounter creation failed), `provider_id` is left NULL and the claim is still created. Consistent with Phase 6's policy.
+- The `match_provider` fuzzy threshold (score ≥ 85) is inherited from Phase 4. If provider name OCR from EOBs is noisy, the threshold may need tuning in a future phase.
 
 ## Phase 8: Gap Review & Scoping
 **What's true when this is done:** The roadmap has been reviewed against real usage, open questions are resolved or deferred with explicit reasoning, and the next build cycle has a clear scope.

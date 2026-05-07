@@ -36,6 +36,7 @@ from src.medical.entities import (
     create_practice,
     create_provider,
     find_encounter_by_date_and_practice,
+    set_encounter_provider,
 )
 from src.medical.extraction import ExtractionResult, extract_from_file
 from src.medical.matching import match_claim, match_practice, match_provider
@@ -331,6 +332,49 @@ async def commit_ingestion(db_path: str, chat_id: int, pending: dict) -> None:
                         f"service_date={claim.service_date} practice_id={pid}"
                     )
                 encounter_id = encounter["id"] if encounter else None
+
+                # Phase 7: auto-link rendering provider to the encounter stub.
+                # Best-effort — never abort the commit on provider failure.
+                provider_name = (claim.provider_name or "").strip()
+                if provider_name and encounter is not None:
+                    provider = await asyncio.to_thread(
+                        match_provider, db_path, provider_name
+                    )
+                    if provider is None:
+                        provider = await asyncio.to_thread(
+                            create_provider, db_path, provider_name
+                        )
+                    if provider is None:
+                        logger.warning(
+                            f"commit_ingestion: could not match or create provider "
+                            f"name='{provider_name}' chat_id={chat_id}; "
+                            f"leaving encounter id={encounter_id} provider_id NULL"
+                        )
+                    else:
+                        result = await asyncio.to_thread(
+                            set_encounter_provider,
+                            db_path,
+                            encounter_id,
+                            provider["id"],
+                        )
+                        if result is True:
+                            logger.info(
+                                f"commit_ingestion: linked provider id={provider['id']} "
+                                f"name='{provider_name}' to encounter id={encounter_id} "
+                                f"chat_id={chat_id}"
+                            )
+                        elif result is False:
+                            logger.debug(
+                                f"commit_ingestion: encounter id={encounter_id} "
+                                f"already has a provider_id; skipping link to "
+                                f"provider id={provider['id']}"
+                            )
+                        elif result is None:
+                            logger.error(
+                                f"commit_ingestion: failed to set encounter provider "
+                                f"encounter_id={encounter_id} provider_id={provider['id']} "
+                                f"chat_id={chat_id}"
+                            )
 
                 created_claim = await asyncio.to_thread(
                     create_claim,

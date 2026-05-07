@@ -8,6 +8,7 @@ from src.medical.claims import create_claim, find_by_match_key
 from src.medical.entities import (
     create_encounter,
     create_practice,
+    create_provider,
     find_encounter_by_date_and_practice,
 )
 from src.medical.extraction import (
@@ -39,12 +40,14 @@ def _make_pending(
     billed_amount: float = 250.0,
     claim_matched: bool = False,
     claim_id: int | None = None,
+    provider_name: str | None = None,
 ) -> dict:
     """Build a minimal pending confirmation dict matching the real shape."""
     extracted_claim = ExtractedClaim(
         service_date=service_date,
         billed_amount=billed_amount,
         practice_name=practice_name,
+        provider_name=provider_name,
     )
     extraction = ExtractionResult(
         doc_type="eob",
@@ -136,3 +139,95 @@ async def test_commit_ingestion_matched_claim_encounter_not_overwritten(db_path)
     ).fetchone()
     conn.close()
     assert row[0] == enc["id"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: auto-link provider from EOB
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_ingestion_eob_with_provider_name_sets_encounter_provider_id(db_path):
+    practice = create_practice(db_path, "Test Practice")
+    pending = _make_pending(practice["id"], provider_name="Dr. Smith")
+
+    await commit_ingestion(db_path, 12345, pending)
+
+    encounter = find_encounter_by_date_and_practice(db_path, "2025-09-23", practice["id"])
+    assert encounter is not None
+    assert encounter["provider_id"] is not None
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    provider = conn.execute(
+        "SELECT id, name FROM providers WHERE name=?", ("Dr. Smith",)
+    ).fetchone()
+    conn.close()
+    assert provider is not None
+    assert encounter["provider_id"] == provider["id"]
+
+
+@pytest.mark.asyncio
+async def test_commit_ingestion_second_eob_with_different_provider_does_not_overwrite(db_path):
+    practice = create_practice(db_path, "Test Practice")
+
+    # First EOB: new claim, sets provider to Dr. Smith
+    pending1 = _make_pending(
+        practice["id"], billed_amount=250.0, provider_name="Dr. Smith"
+    )
+    await commit_ingestion(db_path, 12345, pending1)
+
+    encounter_after_first = find_encounter_by_date_and_practice(
+        db_path, "2025-09-23", practice["id"]
+    )
+    # Guard: the test is invalid if the first commit didn't set provider_id.
+    assert encounter_after_first is not None
+    assert encounter_after_first["provider_id"] is not None
+    original_provider_id = encounter_after_first["provider_id"]
+
+    # Second EOB: different billed_amount → new claim, same encounter,
+    # different provider name → must NOT overwrite.
+    pending2 = _make_pending(
+        practice["id"], billed_amount=300.0, provider_name="Dr. Jones"
+    )
+    await commit_ingestion(db_path, 12345, pending2)
+
+    encounter_after_second = find_encounter_by_date_and_practice(
+        db_path, "2025-09-23", practice["id"]
+    )
+    assert encounter_after_second is not None
+    assert encounter_after_second["provider_id"] == original_provider_id
+
+
+@pytest.mark.asyncio
+async def test_commit_ingestion_eob_with_no_provider_leaves_provider_id_null(db_path):
+    practice = create_practice(db_path, "Test Practice")
+    pending = _make_pending(practice["id"], provider_name=None)
+
+    await commit_ingestion(db_path, 12345, pending)
+
+    encounter = find_encounter_by_date_and_practice(db_path, "2025-09-23", practice["id"])
+    assert encounter is not None
+    assert encounter["provider_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_commit_ingestion_eob_with_provider_matches_existing_provider_no_duplicate(db_path):
+    practice = create_practice(db_path, "Test Practice")
+    existing_provider = create_provider(db_path, "Dr. Smith")
+    assert existing_provider is not None
+
+    pending = _make_pending(practice["id"], provider_name="Dr. Smith")
+    await commit_ingestion(db_path, 12345, pending)
+
+    encounter = find_encounter_by_date_and_practice(db_path, "2025-09-23", practice["id"])
+    assert encounter is not None
+    assert encounter["provider_id"] == existing_provider["id"]
+
+    # Only one provider row should exist for "Dr. Smith".
+    conn = sqlite3.connect(db_path)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM providers WHERE name=?", ("Dr. Smith",)
+    ).fetchone()[0]
+    conn.close()
+    assert count == 1
