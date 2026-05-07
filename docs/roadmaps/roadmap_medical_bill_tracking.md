@@ -192,6 +192,33 @@ Phase 5 closes the reconciliation loop. New `src/medical/queries.py` exposes rea
 - `src/scheduler.py` — added `register_medical_alert_jobs(scheduler, database_dir, timezone)` which registers three global cron jobs (idempotent via `replace_existing=True`). Called from `schedule_check_ins`.
 - `tests/test_medical_queries.py` — 15 new tests covering all query functions, member-holds nudge dispatch (with mocked `send_message`), and `/balance` formatting.
 
+## Phase 6: Encounter Stubs from EOB Ingestion
+**What's true when this is done:** Sending an EOB for an appointment not yet in the system automatically creates a minimal encounter (service_date + practice_id) and links the new claim to it. `/balance` via `v_encounter_balance` rolls up correctly without any manual encounter entry.
+
+- [ ] Add `find_encounter_by_date_and_practice(db_path, service_date, practice_id) -> Optional[dict]` to `src/medical/entities.py`
+- [ ] Extend `create_claim` in `src/medical/claims.py` to accept an optional `encounter_id` parameter and include it in the INSERT
+- [ ] In `commit_ingestion` (`src/medical/ingestion.py`): before creating a new claim, look up or create a minimal encounter; pass `encounter_id` to `create_claim`
+- [ ] Only create encounter stubs for new claims — matched (existing) claims are left untouched
+- [ ] Write tests: new EOB creates encounter + linked claim; second EOB for same visit reuses existing encounter; existing claim with encounter_id already set is not overwritten
+
+## Phase 7: Auto-Link Provider from EOB
+**What's true when this is done:** When an EOB names a rendering provider, Luigi matches or creates that provider and links them to the encounter stub created in Phase 6. The provider appears in the encounter record without manual entry.
+
+- [ ] Extend `ExtractionResult` / `ExtractedProvider` schema in `src/medical/extraction.py` to capture the rendering provider name per claim (if present in the EOB)
+- [ ] In `commit_ingestion`: after resolving the encounter, match or create the provider (`match_provider` → `create_provider`), then update `encounters.provider_id` via a new `set_encounter_provider(db_path, encounter_id, provider_id)` helper in `entities.py`
+- [ ] Only set provider if the encounter's `provider_id` is currently NULL — never overwrite a manually-set provider
+- [ ] Write tests: EOB with provider name sets encounter.provider_id; second EOB with different provider does not overwrite; EOB with no provider leaves provider_id NULL
+
+## Phase 8: Gap Review & Scoping
+**What's true when this is done:** The roadmap has been reviewed against real usage, open questions are resolved or deferred with explicit reasoning, and the next build cycle has a clear scope.
+
+- [ ] Review all open questions from Phase 1–7 handoffs and the Blockers section below
+- [ ] Test end-to-end with the Sep 23 EOB PDFs after Phases 6–7 land: confirm encounter stubs created, providers linked, `/balance` totals correct
+- [ ] Identify any gaps: missing commands, edge cases in the confirmation flow, scanned-PDF handling (deferred in Phase 4), multi-photo album combining (deferred in Phase 4)
+- [ ] Decide: HSA/FSA reimbursement automation scope (currently deferred in Blockers)
+- [ ] Decide: multi-insurer support scope (currently deferred in Blockers)
+- [ ] Write a short findings doc or update this roadmap with decisions made
+
 ## Blockers & Open Questions
 - [x] **DB migration strategy** — use existing `init_db()` pattern: all schema changes go in `src/database.py` inside `init_db()` with idempotent `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD COLUMN` wrapped in `try/except`. No alembic, no separate migration files.
 - [ ] **Multi-insurer support deferred** — single insurer assumed throughout. Revisit when a second insurer enters the picture (HSA/FSA, dental).
