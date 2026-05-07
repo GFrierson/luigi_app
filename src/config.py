@@ -23,7 +23,11 @@ class Settings:
     # App Config
     TIMEZONE: str
     DATABASE_DIR: str
+    DOCUMENTS_DIR: str
     LOG_LEVEL: str
+
+    # Optional (has default)
+    VISION_MODEL: str = "anthropic/claude-sonnet-4-6"
 
     @classmethod
     def load(cls) -> 'Settings':
@@ -35,6 +39,7 @@ class Settings:
             'LLM_MODEL',
             'TIMEZONE',
             'DATABASE_DIR',
+            'DOCUMENTS_DIR',
             'LOG_LEVEL'
         ]
 
@@ -50,6 +55,9 @@ class Settings:
 
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+        # Optional with default
+        env_values['VISION_MODEL'] = os.getenv('VISION_MODEL', 'anthropic/claude-sonnet-4-6')
 
         settings = cls(**env_values)
         logger.info("Configuration loaded successfully")

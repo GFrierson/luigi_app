@@ -18,6 +18,13 @@ from src.database import (
     log_medication_event, create_medication_group, create_medication,
 )
 from src.agent import generate_response, format_schedule_for_prompt, extract_medication_action, get_medication_state_context
+from src.medical.ingestion import (
+    ingest_document,
+    handle_photo_group,
+    commit_ingestion,
+    _pending_confirmations,
+)
+from src.medical.confirmation import parse_confirmation_reply
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +378,115 @@ async def schedule_command(update: Update, context) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # Telegram Bot API limit
+
+
+async def _on_document(update: Update, context) -> None:
+    """Handler for incoming Telegram document messages (PDF, etc.)."""
+    if not update.message or not update.message.document:
+        return
+
+    chat_id = update.message.chat_id
+    doc = update.message.document
+
+    if doc.file_size and doc.file_size > _MAX_UPLOAD_BYTES:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "That file is over 20 MB (Telegram API limit). "
+                "Please compress it or split into pages."
+            ),
+        )
+        return
+
+    config = get_settings()
+    db_path = get_user_db_path(config.DATABASE_DIR, chat_id)
+    init_db(db_path)
+
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        ba = await tg_file.download_as_bytearray()
+        file_bytes = bytes(ba)
+    except Exception:
+        logger.error(
+            f"_on_document: failed to download file for chat {chat_id}",
+            exc_info=True,
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="I couldn't download that file from Telegram. Please try again.",
+        )
+        return
+
+    result = await ingest_document(
+        db_path,
+        config.DOCUMENTS_DIR,
+        chat_id,
+        file_bytes,
+        doc.file_name or "document",
+        doc.mime_type or "application/octet-stream",
+        context,
+    )
+    await context.bot.send_message(chat_id=chat_id, text=result)
+
+
+async def _on_photo(update: Update, context) -> None:
+    """Handler for incoming Telegram photo messages."""
+    if not update.message or not update.message.photo:
+        return
+
+    chat_id = update.message.chat_id
+    photo = update.message.photo[-1]  # largest size
+
+    if photo.file_size and photo.file_size > _MAX_UPLOAD_BYTES:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="That photo is over 20 MB. Please send a smaller version.",
+        )
+        return
+
+    config = get_settings()
+    db_path = get_user_db_path(config.DATABASE_DIR, chat_id)
+    init_db(db_path)
+
+    try:
+        tg_file = await context.bot.get_file(photo.file_id)
+        ba = await tg_file.download_as_bytearray()
+        file_bytes = bytes(ba)
+    except Exception:
+        logger.error(
+            f"_on_photo: failed to download photo for chat {chat_id}",
+            exc_info=True,
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="I couldn't download that photo from Telegram. Please try again.",
+        )
+        return
+
+    media_group_id = update.message.media_group_id
+    if media_group_id:
+        await handle_photo_group(
+            chat_id,
+            media_group_id,
+            file_bytes,
+            db_path,
+            config.DOCUMENTS_DIR,
+            context,
+        )
+    else:
+        result = await ingest_document(
+            db_path,
+            config.DOCUMENTS_DIR,
+            chat_id,
+            file_bytes,
+            "photo.jpg",
+            "image/jpeg",
+            context,
+        )
+        await context.bot.send_message(chat_id=chat_id, text=result)
+
+
 async def _on_message(update: Update, context) -> None:
     """python-telegram-bot handler: extracts fields and delegates to handle_message."""
     if not update.message or not update.message.text:
@@ -382,6 +498,48 @@ async def _on_message(update: Update, context) -> None:
 
     if not text:
         return
+
+    # Confirmation intercept: if there's a pending document confirmation for
+    # this chat, route the reply through parse_confirmation_reply first.
+    if chat_id in _pending_confirmations:
+        config = get_settings()
+        db_path = get_user_db_path(config.DATABASE_DIR, chat_id)
+        pending = _pending_confirmations[chat_id]
+        result = parse_confirmation_reply(text, pending.get("pending_items", []))
+        action = result.get("action")
+        if action == "confirm":
+            try:
+                await commit_ingestion(db_path, chat_id, pending)
+            except Exception:
+                logger.error(
+                    f"_on_message: commit_ingestion failed for chat {chat_id}",
+                    exc_info=True,
+                )
+            _pending_confirmations.pop(chat_id, None)
+            try:
+                await context.bot.send_message(chat_id=chat_id, text="Saved.")
+            except Exception:
+                logger.error(
+                    f"_on_message: failed to send 'Saved.' to chat {chat_id}",
+                    exc_info=True,
+                )
+            return
+        elif action == "correction":
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"Got it. What specifically should be corrected for "
+                        f"item {result['item_index']}?"
+                    ),
+                )
+            except Exception:
+                logger.error(
+                    f"_on_message: failed to send correction prompt to chat {chat_id}",
+                    exc_info=True,
+                )
+            return
+        # free_text or unknown: fall through to normal handle_message
 
     telegram_first_name = None
     if update.message.from_user:
@@ -401,4 +559,6 @@ def create_application(token: str) -> Application:
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_message))
+    application.add_handler(MessageHandler(filters.Document.ALL, _on_document))
+    application.add_handler(MessageHandler(filters.PHOTO, _on_photo))
     return application

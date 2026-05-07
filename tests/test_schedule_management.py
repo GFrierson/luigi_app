@@ -207,6 +207,7 @@ class TestExecuteScheduleAction:
                 LLM_MODEL="m",
                 TIMEZONE="UTC",
                 DATABASE_DIR="data/",
+                DOCUMENTS_DIR="data/documents/",
                 LOG_LEVEL="INFO",
             )
             await _execute_schedule_action(action, chat_id=12345, db_path=temp_db, scheduler=mock_scheduler)

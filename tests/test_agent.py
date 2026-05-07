@@ -18,6 +18,7 @@ def mock_settings():
         LLM_MODEL="test-model",
         TIMEZONE="America/New_York",
         DATABASE_DIR="test_data/",
+        DOCUMENTS_DIR="test_data/documents/",
         LOG_LEVEL="INFO"
     )
 

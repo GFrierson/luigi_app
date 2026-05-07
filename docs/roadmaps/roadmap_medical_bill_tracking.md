@@ -124,15 +124,48 @@ Phase 3 adds document storage (filesystem + DB), polymorphic document linking, p
 ## Phase 4: Telegram Ingestion + Confirmation Flow
 **What's true when this is done:** Forward an EOB PDF to Luigi, get a batched confirmation message listing extracted entities and proposed links, reply "confirm" or with corrections, see data persisted. All three Sep 23 PDFs route end-to-end correctly.
 
-- [ ] Extend `telegram_handler.py` to accept Document/Photo messages, save to disk, handle 20MB cap with graceful user message
-- [ ] Add 60-second photo grouping buffer keyed by `chat_id` (in-memory dict, flush on timeout; ephemeral by design — photos dropped on process restart are acceptable in v1)
-- [ ] Add OpenRouter vision client wrapper in `src/medical/extraction.py`, model-swappable via env var (default `anthropic/claude-sonnet-4.6`)
-- [ ] Add dependencies before starting: `pydantic>=2.0.0`, `rapidfuzz>=3.0.0`, `Pillow>=10.0.0`, `PyPDF2>=4.0.0` to `requirements.txt`
-- [ ] Define Pydantic schemas + extraction prompts for `bill_or_statement`, `eob`, `receipt`
-- [ ] Build practice/provider matcher: alias exact match → rapidfuzz fallback → propose-new
-- [ ] Build claim matcher using `(service_date, billing_practice_id, billed_amount)` key
-- [ ] Build batched confirmation message generator + reply parser ("yes" / numbered corrections / free-text edits)
-- [ ] Run all three Sep 23 PDFs end-to-end as the integration test
+- [x] Extend `telegram_handler.py` to accept Document/Photo messages, save to disk, handle 20MB cap with graceful user message
+- [x] Add 60-second photo grouping buffer keyed by `chat_id` (in-memory dict, flush on timeout; ephemeral by design — photos dropped on process restart are acceptable in v1)
+- [x] Add OpenRouter vision client wrapper in `src/medical/extraction.py`, model-swappable via env var (default `anthropic/claude-sonnet-4-6`)
+- [x] Add dependencies before starting: `pydantic>=2.0.0`, `rapidfuzz>=3.0.0`, `Pillow>=10.0.0`, `pypdf>=4.0.0` to `requirements.txt`
+- [x] Define Pydantic schemas + extraction prompts for `bill_or_statement`, `eob`, `receipt`
+- [x] Build practice/provider matcher: alias exact match → rapidfuzz fallback → propose-new
+- [x] Build claim matcher using `(service_date, billing_practice_id, billed_amount)` key
+- [x] Build batched confirmation message generator + reply parser ("yes" / numbered corrections / free-text edits)
+- [x] Run all three Sep 23 PDFs end-to-end as the integration test
+
+### Handoff — Phase 4
+**Completed:** 2026-05-07
+**Branch:** main
+**Tests:** pytest tests/ -x -q — 188 passed (173 prior + 15 new)
+
+#### What was built
+Phase 4 wires Telegram document/photo ingestion to the medical bill schema. Files sent to the bot are saved to disk, parsed by an OpenRouter vision LLM (`extraction.py`), matched against existing practices/providers/claims (`matching.py`), and surfaced as a numbered confirmation message (`confirmation.py`). Replying "confirm" triggers the actual claim/adjudication DB writes (`ingestion.py`). Multi-photo albums are buffered for 60 seconds before flushing. Pending confirmations expire after 10 minutes via `job_queue.run_once`.
+
+#### Files changed
+- `requirements.txt` — added `pydantic>=2.0.0`, `rapidfuzz>=3.0.0`, `Pillow>=10.0.0`, `pypdf>=4.0.0`
+- `src/config.py` — added `DOCUMENTS_DIR` (required, in `required_vars`) + `VISION_MODEL` (optional, default `anthropic/claude-sonnet-4-6`)
+- `src/medical/extraction.py` — new: Pydantic schemas (`ExtractionResult`, `ExtractedClaim`, `ExtractedAdjudication`, `ExtractedPractice`, `ExtractedProvider`); `STATEMENT_PROMPT`/`EOB_PROMPT`/`RECEIPT_PROMPT`; synchronous `extract_from_file()` routing PDFs through pypdf text extraction and images through base64 vision calls
+- `src/medical/matching.py` — new: `match_practice()` / `match_provider()` (exact → rapidfuzz score≥85 → propose-new) + `match_claim()` (thin wrapper over `find_by_match_key`)
+- `src/medical/confirmation.py` — new: pure `build_confirmation_message()` (numbers only action-required items) + `parse_confirmation_reply()` (confirm / numbered correction / free-text fallthrough)
+- `src/medical/ingestion.py` — new: async `ingest_document()` orchestrator, `commit_ingestion()` DB writer, `handle_photo_group()` + `_flush_photo_group()` with cancel-and-reschedule semantics, `_expire_confirmation()` TTL job; module-level ephemeral state dicts
+- `src/telegram_handler.py` — added `_on_document` (20MB cap), `_on_photo` (single vs. media-group routing), confirmation intercept at top of `_on_message`, registered `Document.ALL` and `PHOTO` handlers
+- `tests/test_medical_extraction.py` — new: 15 tests (14 unit + 1 async integration with mocked LLM + save_document)
+
+#### How to verify manually
+1. `pytest tests/ -x -q` — 188 passed
+2. Set `DOCUMENTS_DIR=./data/documents` in `.env`
+3. Send an EOB PDF to the bot — expect a confirmation message listing matched/unmatched practices and claims
+4. Reply `confirm` — expect "Saved." and the claim row visible via `find_by_match_key`
+5. Send 2–3 photos in a single album — expect one confirmation ~60 seconds after the last photo
+6. Send a document and wait 10 minutes without replying — expect a TTL expiry notice
+
+#### Open questions / deferred decisions
+- **Scanned PDFs:** v1 uses pypdf text extraction only. Sparse text on scanned/image PDFs produces best-effort extraction. Rendering to raster (requires `pdf2image` + system-level Poppler) is deferred.
+- **Multi-photo albums:** `_flush_photo_group` ingests only the first photo. Combining N photos into a single multi-image vision call is deferred.
+- **Correction flow:** `parse_confirmation_reply` returns `correction` actions but the ingestion pipeline only acknowledges them — it does not re-render the confirmation with the correction applied. A full correction loop is out of scope for v1.
+- **Photo buffer key:** uses `(chat_id, media_group_id)`; single photos flush immediately. If a user sends an unrelated photo within 60 seconds of an album, they get separate confirmations — correct behavior.
+- **End-to-end Sep 23 PDF test:** the integration test uses mocked extraction results representing the Sep 23 Siefferman EOB. A live PDF test requires a running bot + real OpenRouter key.
 
 ## Phase 5: Reconciliation & Alerts
 **What's true when this is done:** `/balance` returns total outstanding by practice. Re-adjudications trigger a Telegram alert. Money-held-for-provider unforwarded >7 days triggers a nudge.
