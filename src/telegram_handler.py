@@ -25,6 +25,11 @@ from src.medical.ingestion import (
     _pending_confirmations,
 )
 from src.medical.confirmation import parse_confirmation_reply
+from src.medical.queries import (
+    get_global_obligations,
+    get_member_holds_overdue,
+    get_readjudicated_claims,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +383,95 @@ async def schedule_command(update: Update, context) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def balance_command(update: Update, context) -> None:
+    """Handle /balance command — show outstanding net obligation grouped by practice."""
+    chat_id = update.effective_chat.id
+    config = get_settings()
+    db_path = get_user_db_path(config.DATABASE_DIR, chat_id)
+    init_db(db_path)
+
+    rows = await asyncio.to_thread(get_global_obligations, db_path)
+
+    # Group by billing_practice_id and sum net_obligation per practice.
+    # Keep practice_name from the first row of each group.
+    by_practice: dict[int, dict] = {}
+    for r in rows:
+        pid = r.get("billing_practice_id")
+        if pid is None:
+            continue
+        existing = by_practice.get(pid)
+        if existing is None:
+            by_practice[pid] = {
+                "practice_name": r.get("practice_name") or "Unknown practice",
+                "net": float(r.get("net_obligation") or 0.0),
+            }
+        else:
+            existing["net"] += float(r.get("net_obligation") or 0.0)
+
+    # Filter to practices with positive outstanding balance only.
+    outstanding = [
+        (info["practice_name"], info["net"])
+        for info in by_practice.values()
+        if info["net"] > 0
+    ]
+
+    if not outstanding:
+        await update.message.reply_text("No outstanding balance.")
+        return
+
+    outstanding.sort(key=lambda x: x[0].lower())
+    total = sum(net for _, net in outstanding)
+    lines = ["Outstanding balance:"]
+    for name, net in outstanding:
+        lines.append(f"  {name}: ${net:.2f}")
+    lines.append(f"Total: ${total:.2f}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def pending_command(update: Update, context) -> None:
+    """Handle /pending command — list member-held insurer payments overdue >7 days."""
+    chat_id = update.effective_chat.id
+    config = get_settings()
+    db_path = get_user_db_path(config.DATABASE_DIR, chat_id)
+    init_db(db_path)
+
+    rows = await asyncio.to_thread(get_member_holds_overdue, db_path, 7)
+
+    if not rows:
+        await update.message.reply_text("No member-held payments pending forwarding.")
+        return
+
+    lines = ["Pending member-held payments:"]
+    for r in rows:
+        practice = r.get("practice_name") or "Unknown practice"
+        amount = float(r.get("held_amount") or 0.0)
+        days = float(r.get("days_held") or 0.0)
+        lines.append(f"  {practice} — ${amount:.2f} (held {days:.0f} days)")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def readjudications_command(update: Update, context) -> None:
+    """Handle /readjudications command — list claims whose current adjudication is revision > 1."""
+    chat_id = update.effective_chat.id
+    config = get_settings()
+    db_path = get_user_db_path(config.DATABASE_DIR, chat_id)
+    init_db(db_path)
+
+    rows = await asyncio.to_thread(get_readjudicated_claims, db_path)
+
+    if not rows:
+        await update.message.reply_text("No re-adjudications on record.")
+        return
+
+    lines = ["Re-adjudicated claims:"]
+    for r in rows:
+        service_date = r.get("service_date") or "unknown date"
+        practice = r.get("practice_name") or "Unknown practice"
+        revision = r.get("revision") or 0
+        lines.append(f"  {service_date} · {practice} · revision {revision}")
+    await update.message.reply_text("\n".join(lines))
+
+
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # Telegram Bot API limit
 
 
@@ -558,6 +652,10 @@ def create_application(token: str) -> Application:
     """Build and return an Application with all message handlers registered."""
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("schedule", schedule_command))
+    application.add_handler(CommandHandler("balance", balance_command))
+    application.add_handler(CommandHandler("pending", pending_command))
+    application.add_handler(CommandHandler("readjudications", readjudications_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_message))
     application.add_handler(MessageHandler(filters.Document.ALL, _on_document))
     application.add_handler(MessageHandler(filters.PHOTO, _on_photo))

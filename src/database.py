@@ -361,18 +361,26 @@ def init_db(db_path: str) -> None:
         )
     """)
 
-    # --- Medical billing views (Phase 3) ---
+    # --- Medical billing views (Phase 3, extended in Phase 5) ---
+    # NOTE: each view uses DROP + CREATE (no IF NOT EXISTS on the CREATE) so that
+    # schema changes to view definitions are picked up on every init_db() call.
+    # init_db() is called frequently (per-message, per-document) — for a SQLite-
+    # backed v1, the cost of dropping/recreating views is negligible.
+    #
     # v_claim_obligation: net amount the member still owes the practice for each claim.
     # - LEFT JOIN adjudications + filter to a.superseded_by IS NULL so unadjudicated
     #   claims still appear (member_owed = 0) and only the current adjudication is used.
     # - Sum only payments member→practice toward payments_applied (insurer→member
     #   transfers are tracked separately in v_member_holds).
+    # - JOIN practices for practice_name (Phase 5: needed by /balance command).
+    cursor.execute("DROP VIEW IF EXISTS v_claim_obligation")
     cursor.execute("""
-        CREATE VIEW IF NOT EXISTS v_claim_obligation AS
+        CREATE VIEW v_claim_obligation AS
         SELECT
             c.id                                        AS claim_id,
             c.service_date                              AS service_date,
             c.billing_practice_id                       AS billing_practice_id,
+            pr.name                                     AS practice_name,
             c.billed_amount                             AS billed_amount,
             COALESCE(a.member_owed, 0.0)                AS member_owed,
             COALESCE(
@@ -389,6 +397,7 @@ def init_db(db_path: str) -> None:
                     END), 0.0
                 )                                       AS net_obligation
         FROM claims c
+        JOIN practices pr ON pr.id = c.billing_practice_id
         LEFT JOIN adjudications a
             ON a.claim_id = c.id AND a.superseded_by IS NULL
         LEFT JOIN payment_applications pa ON pa.claim_id = c.id
@@ -397,30 +406,43 @@ def init_db(db_path: str) -> None:
     """)
 
     # v_member_holds: insurer→member payments — money the insurer paid to the
-    # member that should be forwarded on to a practice.
+    # member that should be forwarded on to a practice. Phase 5 extends this with
+    # billing_practice_id, practice_name, and service_date so the /pending command
+    # can render which practice each held payment belongs to.
+    cursor.execute("DROP VIEW IF EXISTS v_member_holds")
     cursor.execute("""
-        CREATE VIEW IF NOT EXISTS v_member_holds AS
+        CREATE VIEW v_member_holds AS
         SELECT
             pa.claim_id                                    AS claim_id,
+            c.billing_practice_id                          AS billing_practice_id,
+            pr.name                                        AS practice_name,
+            c.service_date                                 AS service_date,
             p.id                                           AS payment_id,
             p.payment_date                                 AS payment_date,
             p.amount                                       AS held_amount,
             julianday('now') - julianday(p.payment_date)   AS days_held
         FROM payments p
         JOIN payment_applications pa ON pa.payment_id = p.id
+        JOIN claims c                ON c.id = pa.claim_id
+        JOIN practices pr            ON pr.id = c.billing_practice_id
         WHERE p.from_party = 'insurer'
           AND p.to_party   = 'member'
     """)
 
     # v_encounter_balance: rolls up net_obligation across all claims for an encounter.
+    # Phase 5: include practice_name via encounters.practice_id (encounters has a
+    # native practice_id FK to practices, so this join is natural).
+    cursor.execute("DROP VIEW IF EXISTS v_encounter_balance")
     cursor.execute("""
-        CREATE VIEW IF NOT EXISTS v_encounter_balance AS
+        CREATE VIEW v_encounter_balance AS
         SELECT
             e.id                   AS encounter_id,
             e.service_date         AS service_date,
             e.practice_id          AS practice_id,
+            pr.name                AS practice_name,
             SUM(vc.net_obligation) AS total_net_obligation
         FROM encounters e
+        JOIN practices pr ON pr.id = e.practice_id
         JOIN claims c ON c.encounter_id = e.id
         JOIN v_claim_obligation vc ON vc.claim_id = c.id
         GROUP BY e.id

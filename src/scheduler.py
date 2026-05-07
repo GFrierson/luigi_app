@@ -11,6 +11,11 @@ from src.database import (
 )
 from src.telegram_handler import send_message
 from src.agent import generate_response, format_messages_for_context
+from src.medical.alerts import (
+    send_readjudication_alerts,
+    send_member_holds_nudge,
+    send_monthly_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +140,56 @@ async def send_medication_reminder(group_name: str, chat_id: int, db_path: str, 
         logger.error(f"Failed to send medication reminder for '{group_name}' to {chat_id}", exc_info=True)
 
 
+def register_medical_alert_jobs(
+    scheduler: AsyncIOScheduler,
+    database_dir: str,
+    timezone: str,
+) -> None:
+    """
+    Register global daily/monthly medical alert jobs.
+
+    These are single (global) jobs — at fire time each one iterates all user
+    DBs and dispatches per-chat alerts. Replaces existing jobs by id, so this
+    is safe to call multiple times across the bot's lifecycle.
+    """
+    tz = ZoneInfo(timezone)
+
+    async def _run_readjudication_alerts() -> None:
+        for chat_id, db_path in get_all_user_databases(database_dir):
+            await send_readjudication_alerts(db_path, chat_id)
+
+    async def _run_holds_nudge() -> None:
+        for chat_id, db_path in get_all_user_databases(database_dir):
+            await send_member_holds_nudge(db_path, chat_id)
+
+    async def _run_monthly_summary() -> None:
+        for chat_id, db_path in get_all_user_databases(database_dir):
+            await send_monthly_summary(db_path, chat_id)
+
+    scheduler.add_job(
+        _run_readjudication_alerts,
+        CronTrigger(hour=9, minute=0, timezone=tz),
+        id="medical_readjudication_alert",
+        name="Medical: daily re-adjudication alerts",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_holds_nudge,
+        CronTrigger(hour=10, minute=0, timezone=tz),
+        id="medical_holds_nudge",
+        name="Medical: daily member-holds nudge",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_monthly_summary,
+        CronTrigger(day=1, hour=8, minute=0, timezone=tz),
+        id="medical_monthly_summary",
+        name="Medical: monthly billing summary",
+        replace_existing=True,
+    )
+    logger.info("Registered global medical alert jobs (re-adjudication, holds nudge, monthly summary)")
+
+
 def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
     """
     Schedule check-ins for ALL users.
@@ -162,6 +217,9 @@ def schedule_check_ins(scheduler: AsyncIOScheduler) -> None:
                 group.get('interval_days', 1), group.get('start_date'),
             )
             total_med_jobs += 1
+
+    # Register global medical alert jobs (idempotent — replace_existing=True)
+    register_medical_alert_jobs(scheduler, config.DATABASE_DIR, config.TIMEZONE)
 
     logger.info(f"Total scheduled check-ins: {total_jobs} for {len(user_databases)} users")
     logger.info(f"Total medication reminder jobs: {total_med_jobs}")

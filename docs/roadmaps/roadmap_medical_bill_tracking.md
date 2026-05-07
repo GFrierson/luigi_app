@@ -170,11 +170,27 @@ Phase 4 wires Telegram document/photo ingestion to the medical bill schema. File
 ## Phase 5: Reconciliation & Alerts
 **What's true when this is done:** `/balance` returns total outstanding by practice. Re-adjudications trigger a Telegram alert. Money-held-for-provider unforwarded >7 days triggers a nudge.
 
-- [ ] Implement net obligation queries: by claim, encounter, practice, global
-- [ ] Add Telegram commands: `/balance`, `/pending`, `/readjudications`
-- [ ] Build re-adjudication detection (new adjudication revision vs prior superseded) + alert dispatch
-- [ ] Build member-holds nudge: payments where `to_party='member'` with no matching outflow >7 days
-- [ ] Build monthly summary message via APScheduler job on the 1st of each month
+- [x] Implement net obligation queries: by claim, encounter, practice, global
+- [x] Add Telegram commands: `/balance`, `/pending`, `/readjudications`
+- [x] Build re-adjudication detection (new adjudication revision vs prior superseded) + alert dispatch
+- [x] Build member-holds nudge: payments where `to_party='member'` with no matching outflow >7 days
+- [x] Build monthly summary message via APScheduler job on the 1st of each month
+
+### Handoff — Phase 5
+**Completed:** 2026-05-07
+**Branch:** main
+**Tests:** pytest tests/ -x -q — 203 passed (188 prior + 15 new)
+
+#### What was built
+Phase 5 closes the reconciliation loop. New `src/medical/queries.py` exposes read-only obligation/holds/re-adjudication queries built on the Phase-3 SQL views (extended with `practice_name` for human-readable output). New Telegram commands `/balance`, `/pending`, and `/readjudications` surface those queries on demand. New `src/medical/alerts.py` defines three async alert dispatchers wired to APScheduler as global daily/monthly cron jobs (re-adjudication alert at 9:00, member-holds nudge at 10:00, monthly summary on day-1 at 8:00).
+
+#### Files changed
+- `src/database.py` — extended all three Phase-3 views to include `practice_name`. Switched `CREATE VIEW IF NOT EXISTS` to `DROP VIEW IF EXISTS` + `CREATE VIEW` so view definition changes are picked up on every `init_db()` call. `v_member_holds` also gained `billing_practice_id` and `service_date`.
+- `src/medical/queries.py` — new module: `get_claim_obligation`, `get_obligations_by_practice`, `get_global_obligations`, `get_encounter_balance`, `get_member_holds_overdue`, `get_readjudicated_claims`, `get_recent_readjudication_events` (the only one querying `claim_events` directly rather than a view).
+- `src/medical/alerts.py` — new module: async `send_readjudication_alerts`, `send_member_holds_nudge`, `send_monthly_summary`. All catch top-level exceptions and log with `exc_info=True`.
+- `src/telegram_handler.py` — added `balance_command`, `pending_command`, `readjudications_command`; registered them in `create_application()` along with the previously unregistered `/schedule`.
+- `src/scheduler.py` — added `register_medical_alert_jobs(scheduler, database_dir, timezone)` which registers three global cron jobs (idempotent via `replace_existing=True`). Called from `schedule_check_ins`.
+- `tests/test_medical_queries.py` — 15 new tests covering all query functions, member-holds nudge dispatch (with mocked `send_message`), and `/balance` formatting.
 
 ## Blockers & Open Questions
 - [x] **DB migration strategy** — use existing `init_db()` pattern: all schema changes go in `src/database.py` inside `init_db()` with idempotent `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD COLUMN` wrapped in `try/except`. No alembic, no separate migration files.
