@@ -237,6 +237,11 @@ def init_db(db_path: str) -> None:
         )
     """)
 
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_encounters_date_practice "
+        "ON encounters(service_date, practice_id)"
+    )
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS procedures (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,

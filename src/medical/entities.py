@@ -399,6 +399,44 @@ def create_encounter(
         conn.close()
 
 
+def find_encounter_by_date_and_practice(
+    db_path: str,
+    service_date: str,
+    practice_id: int,
+) -> Optional[dict]:
+    """Look up an encounter by (service_date, practice_id). Returns row dict or None."""
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, service_date, practice_id, provider_id, notes
+            FROM encounters
+            WHERE service_date = ? AND practice_id = ?
+            """,
+            (service_date, practice_id),
+        )
+        row = cursor.fetchone()
+        if row:
+            logger.debug(
+                f"Found encounter id={row['id']} service_date={service_date} "
+                f"practice_id={practice_id}"
+            )
+            return dict(row)
+        logger.debug(
+            f"No encounter found for service_date={service_date} practice_id={practice_id}"
+        )
+        return None
+    except Exception:
+        logger.error(
+            f"Failed to find encounter service_date={service_date} practice_id={practice_id}",
+            exc_info=True,
+        )
+        return None
+    finally:
+        conn.close()
+
+
 def add_procedure(
     db_path: str,
     encounter_id: int,

@@ -32,8 +32,10 @@ from src.medical.documents import attach_document, save_document
 from src.medical.entities import (
     add_practice_alias,
     add_provider_alias,
+    create_encounter,
     create_practice,
     create_provider,
+    find_encounter_by_date_and_practice,
 )
 from src.medical.extraction import ExtractionResult, extract_from_file
 from src.medical.matching import match_claim, match_practice, match_provider
@@ -304,12 +306,39 @@ async def commit_ingestion(db_path: str, chat_id: int, pending: dict) -> None:
             if existing_claim_id is not None:
                 claim_id = existing_claim_id
             else:
+                # Look up or create a minimal encounter stub for new claims only.
+                encounter = await asyncio.to_thread(
+                    find_encounter_by_date_and_practice, db_path, claim.service_date, pid
+                )
+                if encounter is None:
+                    encounter = await asyncio.to_thread(
+                        create_encounter, db_path, claim.service_date, pid, None, None
+                    )
+                    if encounter:
+                        logger.info(
+                            f"commit_ingestion: created encounter stub id={encounter['id']} "
+                            f"service_date={claim.service_date} practice_id={pid} chat_id={chat_id}"
+                        )
+                    else:
+                        logger.error(
+                            f"commit_ingestion: failed to create encounter stub "
+                            f"service_date={claim.service_date} practice_id={pid} chat_id={chat_id}",
+                            exc_info=False,
+                        )
+                else:
+                    logger.debug(
+                        f"commit_ingestion: reusing encounter id={encounter['id']} "
+                        f"service_date={claim.service_date} practice_id={pid}"
+                    )
+                encounter_id = encounter["id"] if encounter else None
+
                 created_claim = await asyncio.to_thread(
                     create_claim,
                     db_path,
                     claim.service_date,
                     pid,
                     claim.billed_amount,
+                    encounter_id,
                 )
                 if created_claim is None:
                     logger.error(

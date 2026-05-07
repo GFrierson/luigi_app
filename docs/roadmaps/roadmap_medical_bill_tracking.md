@@ -195,11 +195,36 @@ Phase 5 closes the reconciliation loop. New `src/medical/queries.py` exposes rea
 ## Phase 6: Encounter Stubs from EOB Ingestion
 **What's true when this is done:** Sending an EOB for an appointment not yet in the system automatically creates a minimal encounter (service_date + practice_id) and links the new claim to it. `/balance` via `v_encounter_balance` rolls up correctly without any manual encounter entry.
 
-- [ ] Add `find_encounter_by_date_and_practice(db_path, service_date, practice_id) -> Optional[dict]` to `src/medical/entities.py`
-- [ ] Extend `create_claim` in `src/medical/claims.py` to accept an optional `encounter_id` parameter and include it in the INSERT
-- [ ] In `commit_ingestion` (`src/medical/ingestion.py`): before creating a new claim, look up or create a minimal encounter; pass `encounter_id` to `create_claim`
-- [ ] Only create encounter stubs for new claims — matched (existing) claims are left untouched
-- [ ] Write tests: new EOB creates encounter + linked claim; second EOB for same visit reuses existing encounter; existing claim with encounter_id already set is not overwritten
+- [x] Add `find_encounter_by_date_and_practice(db_path, service_date, practice_id) -> Optional[dict]` to `src/medical/entities.py`
+- [x] Extend `create_claim` in `src/medical/claims.py` to accept an optional `encounter_id` parameter and include it in the INSERT
+- [x] In `commit_ingestion` (`src/medical/ingestion.py`): before creating a new claim, look up or create a minimal encounter; pass `encounter_id` to `create_claim`
+- [x] Only create encounter stubs for new claims — matched (existing) claims are left untouched
+- [x] Write tests: new EOB creates encounter + linked claim; second EOB for same visit reuses existing encounter; existing claim with encounter_id already set is not overwritten
+
+### Handoff — Phase 6
+**Completed:** 2026-05-07
+**Branch:** main
+**Tests:** pytest tests/ -x -q — 208 passed
+
+#### What was built
+Phase 6 closes the gap between claim ingestion and encounter tracking. When `commit_ingestion` creates a new claim, it now first looks up an existing encounter for `(service_date, practice_id)` and creates a minimal stub if none exists, then passes the `encounter_id` to `create_claim`. A unique index on `encounters(service_date, practice_id)` enforces one encounter per visit, making the find-or-create safe on retries. Matched (existing) claims are left completely untouched.
+
+#### Files changed
+- `src/medical/entities.py` — new `find_encounter_by_date_and_practice(db_path, service_date, practice_id) -> Optional[dict]` at line 402; follows `resolve_practice` pattern (parameterized SELECT, fetchone, finally close)
+- `src/database.py` — `CREATE UNIQUE INDEX IF NOT EXISTS idx_encounters_date_practice ON encounters(service_date, practice_id)` added to `init_db()` after the encounters table
+- `src/medical/ingestion.py` — added `create_encounter` and `find_encounter_by_date_and_practice` to entity import block; in `commit_ingestion`'s new-claim branch, inserted find-or-create encounter logic (both calls wrapped in `asyncio.to_thread`) before `create_claim`; `create_claim` now receives explicit `encounter_id` kwarg
+- `tests/test_medical_entities.py` — two unit tests for `find_encounter_by_date_and_practice` (returns None on empty, returns row on match)
+- `tests/test_medical_ingestion.py` — new file with three behavioral tests: new-EOB creates stub + linked claim; second EOB reuses existing encounter; matched claim is not overwritten
+
+#### How to verify manually
+1. `pytest tests/test_medical_ingestion.py tests/test_medical_entities.py -v` — all pass
+2. Python REPL: `from src.database import init_db; from src.medical.entities import *; from src.medical.ingestion import commit_ingestion` — create a practice, build a minimal pending dict with `claim_match: None`, call `commit_ingestion`, then verify `find_encounter_by_date_and_practice` returns a row and the claim's `encounter_id` matches it
+3. Call `commit_ingestion` a second time with the same `service_date` and `practice_id` but different `billed_amount` — only one encounter row should exist in `SELECT COUNT(*) FROM encounters`
+
+#### Open questions / deferred decisions
+- `create_encounter` is called with `provider_id=None, notes=None` — Phase 7 will fill `provider_id` from the EOB rendering provider field. The stub is intentionally minimal.
+- The unique index was added as a `CREATE UNIQUE INDEX IF NOT EXISTS` (not a table constraint) so it applies idempotently to existing live DBs without ALTER TABLE.
+- `commit_ingestion` adopts a best-effort policy on encounter creation failure: if `create_encounter` returns `None`, the claim is still created with `encounter_id=None` rather than aborting the entire ingestion.
 
 ## Phase 7: Auto-Link Provider from EOB
 **What's true when this is done:** When an EOB names a rendering provider, Luigi matches or creates that provider and links them to the encounter stub created in Phase 6. The provider appears in the encounter record without manual entry.

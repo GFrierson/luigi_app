@@ -7,3 +7,4 @@ claude/
 vps_rebuild.md
 __pycache__/
 *.pyc
+.DS_Store

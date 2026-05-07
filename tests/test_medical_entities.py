@@ -13,6 +13,7 @@ from src.medical.entities import (
     create_encounter,
     create_practice,
     create_provider,
+    find_encounter_by_date_and_practice,
     get_procedures_for_encounter,
     get_provider_practices,
     resolve_entity_to_practice,
@@ -212,6 +213,22 @@ def test_add_procedure_with_cpt_and_icd(db_path):
     assert procedure["icd_code"] == "M54.5"
     assert procedure["billed_amount"] == 250.00
     assert procedure["notes"] == "Follow-up"
+
+
+def test_find_encounter_by_date_and_practice_returns_none_when_missing(db_path):
+    practice = create_practice(db_path, "Test Practice")
+    result = find_encounter_by_date_and_practice(db_path, "2025-09-23", practice["id"])
+    assert result is None
+
+
+def test_find_encounter_by_date_and_practice_returns_matching_row(db_path):
+    practice = create_practice(db_path, "Test Practice")
+    enc = create_encounter(db_path, "2025-09-23", practice["id"], None, None)
+    result = find_encounter_by_date_and_practice(db_path, "2025-09-23", practice["id"])
+    assert result is not None
+    assert result["id"] == enc["id"]
+    assert result["service_date"] == "2025-09-23"
+    assert result["practice_id"] == practice["id"]
 
 
 def test_get_procedures_for_encounter_returns_all(db_path):
