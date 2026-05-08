@@ -44,6 +44,7 @@ from src.medical.claims import (
 from src.medical.entities import (
     create_encounter,
     create_practice,
+    find_encounter_by_date_and_practice,
     resolve_practice,
 )
 from src.medical.payments import apply_payment, record_payment
@@ -153,13 +154,17 @@ def _ensure_claim(
 
 def _seed_siefferman(db_path: str, practice_id: int) -> int:
     """Seed the Siefferman claim and its single adjudication. Returns claim id."""
-    encounter = create_encounter(
-        db_path,
-        service_date=SIEFFERMAN["service_date"],
-        practice_id=practice_id,
-        provider_id=None,
-        notes="Siefferman 2025-09-23 office visit (fixture)",
+    encounter = find_encounter_by_date_and_practice(
+        db_path, SIEFFERMAN["service_date"], practice_id
     )
+    if encounter is None:
+        encounter = create_encounter(
+            db_path,
+            service_date=SIEFFERMAN["service_date"],
+            practice_id=practice_id,
+            provider_id=None,
+            notes="Siefferman 2025-09-23 office visit (fixture)",
+        )
     encounter_id = encounter["id"] if encounter else None
 
     claim_id = _ensure_claim(
@@ -186,13 +191,17 @@ def _seed_siefferman(db_path: str, practice_id: int) -> int:
 
 def _seed_mikaberidze(db_path: str, practice_id: int) -> int:
     """Seed the Mikaberidze claim with two adjudications + a member-hold payment."""
-    encounter = create_encounter(
-        db_path,
-        service_date=MIKABERIDZE["service_date"],
-        practice_id=practice_id,
-        provider_id=None,
-        notes="Mikaberidze 2025-09-23 office visit (fixture)",
+    encounter = find_encounter_by_date_and_practice(
+        db_path, MIKABERIDZE["service_date"], practice_id
     )
+    if encounter is None:
+        encounter = create_encounter(
+            db_path,
+            service_date=MIKABERIDZE["service_date"],
+            practice_id=practice_id,
+            provider_id=None,
+            notes="Mikaberidze 2025-09-23 office visit (fixture)",
+        )
     encounter_id = encounter["id"] if encounter else None
 
     claim_id = _ensure_claim(

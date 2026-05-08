@@ -16,7 +16,9 @@ from src.medical.extraction import (
     ExtractedPractice,
     ExtractionResult,
 )
+from src.medical.claims import adjudicate_claim
 from src.medical.ingestion import _pending_confirmations, commit_ingestion
+from src.medical.scripts.seed_sep23_fixture import seed
 
 
 @pytest.fixture
@@ -231,3 +233,65 @@ async def test_commit_ingestion_eob_with_provider_matches_existing_provider_no_d
     ).fetchone()[0]
     conn.close()
     assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: gap review — view math and seed fixture integrity
+# ---------------------------------------------------------------------------
+
+
+def test_phase8_encounter_balance_view_sums_two_claims(db_path):
+    """v_encounter_balance totals net_obligation across all claims for an encounter."""
+    practice = create_practice(db_path, "Test Practice")
+    enc = create_encounter(db_path, "2025-09-23", practice["id"], None, None)
+    claim1 = create_claim(db_path, "2025-09-23", practice["id"], 500.0, enc["id"])
+    claim2 = create_claim(db_path, "2025-09-23", practice["id"], 300.0, enc["id"])
+    adjudicate_claim(db_path, claim1["id"], "2025-10-01", 400.0, 200.0, 200.0, 0.0)
+    adjudicate_claim(db_path, claim2["id"], "2025-10-01", 250.0, 100.0, 150.0, 0.0)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT total_net_obligation FROM v_encounter_balance WHERE encounter_id=?",
+        (enc["id"],),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["total_net_obligation"] == pytest.approx(350.0)
+
+
+def test_phase8_seed_fixture_view_totals(tmp_path):
+    """Sep 23 fixture produces expected headline figures in v_claim_obligation and v_member_holds."""
+    db_path = str(tmp_path / "fixture.db")
+    seed(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    siefferman_row = conn.execute(
+        "SELECT net_obligation FROM v_claim_obligation WHERE billed_amount=5625.0"
+    ).fetchone()
+    mikaberidze_hold_row = conn.execute(
+        "SELECT held_amount FROM v_member_holds LIMIT 1"
+    ).fetchone()
+    conn.close()
+
+    assert siefferman_row is not None
+    assert siefferman_row["net_obligation"] == pytest.approx(4501.5)
+    assert mikaberidze_hold_row is not None
+    assert mikaberidze_hold_row["held_amount"] == pytest.approx(5275.5)
+
+
+def test_phase8_seed_fixture_no_orphan_claims(tmp_path):
+    """After seeding the Sep 23 fixture, every claim must have an encounter_id."""
+    db_path = str(tmp_path / "fixture.db")
+    seed(db_path)
+
+    conn = sqlite3.connect(db_path)
+    orphan_count = conn.execute(
+        "SELECT COUNT(*) FROM claims WHERE encounter_id IS NULL"
+    ).fetchone()[0]
+    conn.close()
+
+    assert orphan_count == 0
