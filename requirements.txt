@@ -8,3 +8,6 @@ pydantic>=2.0.0
 rapidfuzz>=3.0.0
 Pillow>=10.0.0
 pypdf>=4.0.0
+# pdf2image renders scanned (no-text-layer) PDFs to raster images.
+# Requires the Poppler system binary: apt: poppler-utils / brew: poppler
+pdf2image>=1.16.0

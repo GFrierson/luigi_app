@@ -38,7 +38,11 @@ from src.medical.entities import (
     find_encounter_by_date_and_practice,
     set_encounter_provider,
 )
-from src.medical.extraction import ExtractionResult, extract_from_file
+from src.medical.extraction import (
+    MAX_ALBUM_IMAGES,
+    ExtractionResult,
+    extract_from_file,
+)
 from src.medical.matching import match_claim, match_practice, match_provider
 
 logger = logging.getLogger(__name__)
@@ -75,10 +79,15 @@ async def ingest_document(
     original_name: str,
     mime_type: str,
     context,  # telegram.ext.CallbackContext (typed loosely to avoid hard import)
+    extra_image_bytes: Optional[list[bytes]] = None,
 ) -> str:
     """
     End-to-end ingestion for a single document. Returns the user-facing
     confirmation message string.
+
+    `extra_image_bytes` carries additional album photos beyond the primary
+    `file_bytes`; it is passed through to extraction so all pages land in one
+    vision call. Single-document callers leave it None.
 
     No DB writes for claims/adjudications yet — those happen in commit_ingestion
     after the user replies "confirm". Only the documents row + on-disk file are
@@ -115,7 +124,7 @@ async def ingest_document(
 
         # Step 2: extract structured data via vision LLM.
         extraction: Optional[ExtractionResult] = await asyncio.to_thread(
-            extract_from_file, file_path, mime_type
+            extract_from_file, file_path, mime_type, extra_image_bytes
         )
         if extraction is None:
             logger.warning(
@@ -495,8 +504,10 @@ async def _flush_photo_group(context) -> None:
     """
     Job callback: process the buffered photos for an album.
 
-    v1: ingest only the first photo as a single document. Multi-page album
-    handling (combining N photos into one logical document) is deferred.
+    All buffered photos are combined into one logical document and shipped to
+    the vision model in a single multi-image call (Phase 9). Albums larger than
+    MAX_ALBUM_IMAGES are rejected with a user-facing message rather than being
+    truncated, since dropping pages would silently lose document content.
     """
     try:
         data = context.job.data
@@ -509,17 +520,41 @@ async def _flush_photo_group(context) -> None:
             logger.debug(f"_flush_photo_group: no buffered photos for {key}")
             return
 
-        # v1: pick the first photo as the document. Future: ship all to the
-        # LLM as a multi-part vision call.
-        first = photos[0]
+        if len(photos) > MAX_ALBUM_IMAGES:
+            logger.warning(
+                f"_flush_photo_group: album of {len(photos)} photos exceeds "
+                f"MAX_ALBUM_IMAGES={MAX_ALBUM_IMAGES} for chat {chat_id}; "
+                f"rejecting without extraction."
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"That album has {len(photos)} photos — the limit is "
+                        f"{MAX_ALBUM_IMAGES}. Please resend as smaller groups."
+                    ),
+                )
+            except Exception:
+                logger.error(
+                    f"_flush_photo_group: failed to send album-limit notice to "
+                    f"chat {chat_id}",
+                    exc_info=True,
+                )
+            return
+
+        # Primary photo carries the document; the rest ride along as extras so
+        # all pages land in a single vision call.
+        primary = photos[0]
+        extras = photos[1:]
         result = await ingest_document(
             db_path,
             documents_dir,
             chat_id,
-            first,
+            primary,
             "photo.jpg",
             "image/jpeg",
             context,
+            extras if extras else None,
         )
         try:
             await context.bot.send_message(chat_id=chat_id, text=result)

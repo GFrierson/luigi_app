@@ -15,16 +15,19 @@ wrap it in `asyncio.to_thread()`.
 
 Design notes:
     - PDFs are processed via pypdf text extraction. Scanned PDFs that produce
-      sparse text will yield best-effort/empty extractions; rendering scanned
-      pages to raster images is deferred to a later phase (no `pdf2image`
-      dependency in v1 since it requires a system-level Poppler install).
+      sparse text (below SPARSE_TEXT_THRESHOLD chars/page) are rasterized via
+      `pdf2image.convert_from_path()` and sent to the vision model as a
+      multi-image payload (Phase 9). `pdf2image` requires a system-level
+      Poppler install (apt: poppler-utils / brew: poppler).
     - Images (JPEG/PNG) are sent as base64-encoded image_url parts to the
-      OpenRouter vision endpoint.
+      OpenRouter vision endpoint. Multi-photo albums are packed into a single
+      vision call via _build_multi_image_message (Phase 9).
     - All exceptions are caught at the boundary; the function returns None
       on any failure and logs with exc_info=True.
 """
 
 import base64
+import io
 import logging
 import os
 from typing import Literal, Optional
@@ -36,6 +39,14 @@ from pypdf import PdfReader
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Below this many characters of extracted text *per page*, a PDF is treated as
+# scanned/sparse and routed to the rasterization (vision) path instead of text.
+SPARSE_TEXT_THRESHOLD = 100
+
+# Cap on images packed into a single multi-image vision call. Enforced by the
+# album caller (_flush_photo_group); extract_from_file trusts the caller.
+MAX_ALBUM_IMAGES = 6
 
 
 # ---------------------------------------------------------------------------
@@ -162,18 +173,26 @@ def _detect_doc_kind(mime_type: str, file_path: str) -> str:
     return "unknown"
 
 
-def _extract_pdf_text(file_path: str) -> str:
-    """Extract text from all pages of a PDF using pypdf. Returns '' on error."""
+def _extract_pdf_text(file_path: str) -> tuple[str, list[str]]:
+    """
+    Extract text from all pages of a PDF using pypdf.
+
+    Returns a tuple of (full_text, per_page_texts) where full_text is the
+    newline-joined, stripped concatenation and per_page_texts holds the raw
+    text of each page (used to scale the sparse-text threshold by page count).
+    Returns ("", []) on error.
+    """
     try:
         reader = PdfReader(file_path)
-        parts: list[str] = []
+        per_page_texts: list[str] = []
         for page in reader.pages:
             text = page.extract_text() or ""
-            parts.append(text)
-        return "\n".join(parts).strip()
+            per_page_texts.append(text)
+        full_text = "\n".join(per_page_texts).strip()
+        return full_text, per_page_texts
     except Exception:
         logger.error(f"Failed to extract text from PDF path='{file_path}'", exc_info=True)
-        return ""
+        return "", []
 
 
 def _select_prompt(text_hint: str) -> tuple[str, str]:
@@ -191,6 +210,37 @@ def _select_prompt(text_hint: str) -> tuple[str, str]:
     return STATEMENT_PROMPT, "statement"
 
 
+def _rasterize_pdf(file_path: str) -> list[tuple[str, str]]:
+    """
+    Render every page of a PDF to a base64-encoded JPEG image via pdf2image.
+
+    Returns a list of (b64_string, mime_type) tuples, one per page, where
+    mime_type is always "image/jpeg". Returns [] on any failure (e.g. Poppler
+    not installed) and logs with exc_info=True — callers fall through to the
+    text path.
+    """
+    try:
+        # Deferred import: pdf2image pulls in Poppler at call time, and keeping
+        # the import local means a missing system dependency only affects the
+        # scanned-PDF path rather than module import.
+        from pdf2image import convert_from_path
+
+        pages = convert_from_path(file_path)
+        rasterized: list[tuple[str, str]] = []
+        for image in pages:
+            buf = io.BytesIO()
+            image.save(buf, format="JPEG")
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            rasterized.append((b64, "image/jpeg"))
+        return rasterized
+    except Exception:
+        logger.error(
+            f"_rasterize_pdf: failed to rasterize PDF path='{file_path}'",
+            exc_info=True,
+        )
+        return []
+
+
 def _build_image_message(prompt: str, image_b64: str, mime_type: str) -> list[dict]:
     """Build a chat-completions message list for an image payload."""
     image_url = f"data:{mime_type};base64,{image_b64}"
@@ -205,6 +255,23 @@ def _build_image_message(prompt: str, image_b64: str, mime_type: str) -> list[di
     ]
 
 
+def _build_multi_image_message(
+    prompt: str, images: list[tuple[str, str]]
+) -> list[dict]:
+    """
+    Build a single-user-message payload with one text block followed by N
+    image blocks. `images` is a list of (b64_string, mime_type) tuples.
+
+    Generalizes _build_image_message for the multi-image (scanned-PDF or
+    photo-album) vision path.
+    """
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for image_b64, mime_type in images:
+        image_url = f"data:{mime_type};base64,{image_b64}"
+        content.append({"type": "image_url", "image_url": {"url": image_url}})
+    return [{"role": "user", "content": content}]
+
+
 def _build_text_message(prompt: str, document_text: str) -> list[dict]:
     """Build a chat-completions message list for a text payload."""
     return [
@@ -217,7 +284,11 @@ def _build_text_message(prompt: str, document_text: str) -> list[dict]:
     ]
 
 
-def extract_from_file(file_path: str, mime_type: str) -> Optional[ExtractionResult]:
+def extract_from_file(
+    file_path: str,
+    mime_type: str,
+    extra_image_bytes: Optional[list[bytes]] = None,
+) -> Optional[ExtractionResult]:
     """
     Extract structured fields from a medical document file via the OpenRouter
     vision-capable LLM.
@@ -225,6 +296,10 @@ def extract_from_file(file_path: str, mime_type: str) -> Optional[ExtractionResu
     Args:
         file_path: absolute path to the file on disk
         mime_type: MIME type as reported by the upload (best-effort)
+        extra_image_bytes: optional additional image payloads (a photo album).
+            When provided on the image path, the primary image plus each extra
+            are packed into a single multi-image vision call. The caller is
+            responsible for enforcing the MAX_ALBUM_IMAGES cap.
 
     Returns:
         ExtractionResult on success, or None on any failure (logged).
@@ -242,31 +317,53 @@ def extract_from_file(file_path: str, mime_type: str) -> Optional[ExtractionResu
 
         # Build the message payload depending on the file kind.
         if kind == "pdf":
-            # v1 strategy: text-extract via pypdf. Scanned PDFs will produce
-            # sparse text; we still attempt LLM extraction and let the model
-            # decide based on whatever it sees. PDF -> raster rendering is
-            # deferred (would require pdf2image + Poppler at the system level).
-            text = _extract_pdf_text(file_path)
-            if len(text) <= 50:
-                logger.warning(
-                    f"PDF text extraction was sparse ({len(text)} chars) for "
-                    f"path='{file_path}' — likely a scanned PDF; v1 still attempts "
-                    f"extraction with the limited text we have."
+            # Text-extract via pypdf first. If the per-page text density is below
+            # SPARSE_TEXT_THRESHOLD (likely a scanned PDF), rasterize the pages
+            # and route to the multi-image vision path instead.
+            text, per_page_texts = _extract_pdf_text(file_path)
+            page_count = max(len(per_page_texts), 1)
+            if len(text.strip()) < SPARSE_TEXT_THRESHOLD * page_count:
+                logger.info(
+                    f"PDF text was sparse ({len(text.strip())} chars across "
+                    f"{page_count} page(s)) for path='{file_path}' — attempting "
+                    f"rasterization for a vision-based extraction."
                 )
-            prompt, _hint = _select_prompt(text)
-            messages = _build_text_message(prompt, text)
+                rasterized = _rasterize_pdf(file_path)
+                if rasterized:
+                    prompt = STATEMENT_PROMPT
+                    messages = _build_multi_image_message(prompt, rasterized)
+                else:
+                    logger.warning(
+                        f"_rasterize_pdf returned no images for path='{file_path}' "
+                        f"(Poppler missing or render failure); falling back to the "
+                        f"sparse text path."
+                    )
+                    prompt, _hint = _select_prompt(text)
+                    messages = _build_text_message(prompt, text)
+            else:
+                prompt, _hint = _select_prompt(text)
+                messages = _build_text_message(prompt, text)
 
         elif kind == "image":
             with open(file_path, "rb") as f:
                 raw_bytes = f.read()
             image_b64 = base64.b64encode(raw_bytes).decode("ascii")
-            # We cannot peek at image content for prompt selection; default to
-            # statement and let the model classify via doc_type field.
-            prompt = STATEMENT_PROMPT
             normalized_mime = mime_type.lower() if mime_type else "image/jpeg"
             if normalized_mime not in ("image/jpeg", "image/jpg", "image/png"):
                 normalized_mime = "image/jpeg"
-            messages = _build_image_message(prompt, image_b64, normalized_mime)
+            # We cannot peek at image content for prompt selection; default to
+            # statement and let the model classify via doc_type field.
+            prompt = STATEMENT_PROMPT
+            if extra_image_bytes:
+                # Photo album: pack the primary image plus each extra into a
+                # single multi-image vision call.
+                images: list[tuple[str, str]] = [(image_b64, normalized_mime)]
+                for extra in extra_image_bytes:
+                    extra_b64 = base64.b64encode(extra).decode("ascii")
+                    images.append((extra_b64, "image/jpeg"))
+                messages = _build_multi_image_message(prompt, images)
+            else:
+                messages = _build_image_message(prompt, image_b64, normalized_mime)
 
         else:
             return None

@@ -32,11 +32,36 @@ Every Phase 13+ extractor follows this sequence. The pattern is adapted from the
 ## Phase 9: Scanned PDF Rendering + Multi-Photo Combining
 **What's true when this is done:** A scanned-only EOB PDF (no selectable text) produces a valid `ExtractionResult`. An album of N photos sent to the bot produces one extraction that covers all N images in a single vision call — no pages silently dropped.
 
-- [ ] Add `pdf2image>=1.16.0` to `requirements.txt`; add a comment documenting the required Poppler system dependency (`apt: poppler-utils` / `brew: poppler`)
-- [ ] In `src/medical/extraction.py`: after pypdf text extraction, check `len(text.strip()) < SPARSE_TEXT_THRESHOLD` (tune threshold, suggest 100 chars per page); if sparse, rasterize via `pdf2image.convert_from_path()` and build a multi-image base64 payload instead of a text payload — reuse the existing image vision call path
-- [ ] In `src/medical/ingestion.py` `_flush_photo_group`: collect all `file_id` values buffered for the group before calling extraction; pass the full list to `extract_from_file` (extend signature to accept `List[str]` file paths)
-- [ ] Extend `extraction.py` `extract_from_file` to accept a list of image paths and pack them as multiple `image_url` content blocks in one vision call (OpenRouter supports multi-image in a single message)
-- [ ] Write tests: sparse-PDF branch triggers rasterization path (mock `pdf2image`); album of 3 images produces one `ExtractionResult` with all 3 source images in the payload; dense-text PDF still uses text path (no rasterization)
+- [x] Add `pdf2image>=1.16.0` to `requirements.txt`; add a comment documenting the required Poppler system dependency (`apt: poppler-utils` / `brew: poppler`)
+- [x] In `src/medical/extraction.py`: after pypdf text extraction, check `len(text.strip()) < SPARSE_TEXT_THRESHOLD` (tune threshold, suggest 100 chars per page); if sparse, rasterize via `pdf2image.convert_from_path()` and build a multi-image base64 payload instead of a text payload — reuse the existing image vision call path
+- [x] In `src/medical/ingestion.py` `_flush_photo_group`: collect all `file_id` values buffered for the group before calling extraction; pass the full list to `extract_from_file` (extend signature to accept `List[str]` file paths)
+- [x] Extend `extraction.py` `extract_from_file` to accept a list of image paths and pack them as multiple `image_url` content blocks in one vision call (OpenRouter supports multi-image in a single message)
+- [x] Write tests: sparse-PDF branch triggers rasterization path (mock `pdf2image`); album of 3 images produces one `ExtractionResult` with all 3 source images in the payload; dense-text PDF still uses text path (no rasterization)
+
+### Handoff — Phase 9
+**Completed:** 2026-06-03
+**Branch:** main
+**Tests:** pytest tests/ -x -q → 219 passed
+
+#### What was built
+Scanned PDFs (no selectable text layer) are now rasterized via `pdf2image` and sent to the vision model as a multi-image base64 payload rather than an empty text prompt. Photo albums of up to `MAX_ALBUM_IMAGES=6` images are packed into a single vision call so no pages are silently dropped; albums exceeding the cap receive a user-facing rejection message. The `SPARSE_TEXT_THRESHOLD * page_count` check scales with document length so multi-page EOBs don't false-trigger.
+
+#### Files changed
+- `requirements.txt` — added `pdf2image>=1.16.0` with Poppler system dependency comment
+- `src/medical/extraction.py` — added `SPARSE_TEXT_THRESHOLD=100` and `MAX_ALBUM_IMAGES=6` constants; refactored `_extract_pdf_text` to return `(full_text, per_page_texts)`; added `_rasterize_pdf` (returns `[]` on failure, never raises) and `_build_multi_image_message`; extended `extract_from_file` with `extra_image_bytes` param and sparse-PDF rasterization branch (falls back to text path if rasterization yields nothing)
+- `src/medical/ingestion.py` — extended `ingest_document` with pass-through `extra_image_bytes` param; rewrote `_flush_photo_group` to collect all buffered photos, enforce the cap with a user-facing Telegram message, and pass `photos[1:]` as extras
+- `tests/test_medical_extraction.py` — 4 new tests: sparse-PDF triggers rasterization, dense-PDF skips it, threshold scales with page count, multi-image album completes successfully
+
+#### How to verify manually
+1. Send a scanned-only EOB PDF (no selectable text) to the bot — confirm a valid extraction is returned (requires Poppler installed)
+2. Send an album of 2–3 photos — confirm one combined `ExtractionResult` covers all images
+3. Send an album of 7+ photos — confirm the bot replies with the album-limit rejection message and does not extract
+4. Send a normal text-layer EOB PDF — confirm behavior is unchanged (no rasterization, uses text path)
+
+#### Open questions / deferred decisions
+- **Poppler system dependency:** `_rasterize_pdf` degrades gracefully (logs warning, falls back to sparse text) if Poppler is not installed, but scanned PDFs will not extract correctly until `poppler-utils` is installed on the VPS. This is a deployment task tracked in the Blockers section.
+- **Multi-image token cost:** large albums (3–6 images) increase per-call token usage; the `MAX_ALBUM_IMAGES=6` guard is conservative. Monitor costs in production and lower the cap if needed.
+- **`extra_image_bytes` abstraction:** the extras are raw bytes in memory (never written to disk as separate `documents` rows). If per-photo provenance is needed in the future, `_flush_photo_group` will need to call `save_document` for each extra photo before passing paths.
 
 ---
 

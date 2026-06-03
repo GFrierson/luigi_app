@@ -27,6 +27,7 @@ from src.medical.extraction import (
     ExtractedPractice,
     ExtractedProvider,
     ExtractionResult,
+    extract_from_file,
 )
 from src.medical.ingestion import _pending_confirmations, ingest_document
 from src.medical.matching import match_claim, match_practice, match_provider
@@ -313,3 +314,108 @@ async def test_ingest_document_eob_full_pipeline(db_path, tmp_path):
     assert pending["practice_id_by_name"]["Manhattan Pain Medicine"] == practice["id"]
     # TTL expiry was scheduled
     mock_context.job_queue.run_once.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: scanned-PDF rasterization + multi-image album paths
+# ---------------------------------------------------------------------------
+
+# Minimal JSON that validates as an ExtractionResult, used for all Phase 9
+# LLM-response mocks.
+_VALID_EXTRACTION_JSON = (
+    '{"doc_type": "statement", "document_date": null, "practices": [], '
+    '"providers": [], "claims": [], "adjudications": [], "raw_text": null}'
+)
+
+
+def _mock_settings() -> MagicMock:
+    """Settings stub avoiding real env / OpenRouter coupling."""
+    return MagicMock(
+        OPENROUTER_API_KEY="k",
+        OPENROUTER_BASE_URL="https://x",
+        VISION_MODEL="m",
+    )
+
+
+def _mock_openai_client() -> MagicMock:
+    """OpenAI class mock whose client returns a valid ExtractionResult JSON."""
+    mock_openai = MagicMock()
+    completion = MagicMock()
+    completion.choices[0].message.content = _VALID_EXTRACTION_JSON
+    mock_openai.return_value.chat.completions.create.return_value = completion
+    return mock_openai
+
+
+def test_sparse_pdf_triggers_rasterization():
+    """A sparse 1-page PDF routes through _rasterize_pdf into a vision call."""
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", _mock_openai_client()
+    ), patch(
+        "src.medical.extraction._extract_pdf_text", return_value=("", [""])
+    ), patch(
+        "src.medical.extraction._rasterize_pdf",
+        return_value=[("abc123", "image/jpeg")],
+    ) as mock_rasterize:
+        result = extract_from_file("/tmp/x.pdf", "application/pdf")
+
+    assert result is not None
+    mock_rasterize.assert_called_once()
+
+
+def test_dense_pdf_skips_rasterization():
+    """A dense PDF uses the text path and never rasterizes."""
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", _mock_openai_client()
+    ), patch(
+        "src.medical.extraction._extract_pdf_text",
+        return_value=("x" * 500, ["x" * 500]),
+    ), patch(
+        "src.medical.extraction._rasterize_pdf"
+    ) as mock_rasterize:
+        extract_from_file("/tmp/x.pdf", "application/pdf")
+
+    mock_rasterize.assert_not_called()
+
+
+def test_sparse_pdf_threshold_scales_with_page_count():
+    """250 chars across 3 pages is below 100*3=300, so rasterization triggers."""
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", _mock_openai_client()
+    ), patch(
+        "src.medical.extraction._extract_pdf_text",
+        return_value=("a" * 250, ["a" * 83, "a" * 83, "a" * 84]),
+    ), patch(
+        "src.medical.extraction._rasterize_pdf",
+        return_value=[("abc", "image/jpeg")],
+    ) as mock_rasterize:
+        extract_from_file("/tmp/x.pdf", "application/pdf")
+
+    mock_rasterize.assert_called_once()
+
+
+def test_multi_image_album_produces_single_extraction(tmp_path):
+    """A primary image plus extra_image_bytes completes via the multi-image path."""
+    jpg_path = tmp_path / "img.jpg"
+    jpg_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 32)
+
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", _mock_openai_client()
+    ):
+        result = extract_from_file(
+            str(jpg_path),
+            "image/jpeg",
+            extra_image_bytes=[
+                b"\xff\xd8\xff" + b"\x00" * 10,
+                b"\xff\xd8\xff" + b"\x00" * 10,
+            ],
+        )
+
+    assert result is not None
