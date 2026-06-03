@@ -37,6 +37,7 @@ from pydantic import BaseModel, ValidationError
 from pypdf import PdfReader
 
 from src.config import get_settings
+from src.medical.layout import detect_relevant_pages, load_template, update_template
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +289,8 @@ def extract_from_file(
     file_path: str,
     mime_type: str,
     extra_image_bytes: Optional[list[bytes]] = None,
+    db_path: Optional[str] = None,
+    practice_id: Optional[int] = None,
 ) -> Optional[ExtractionResult]:
     """
     Extract structured fields from a medical document file via the OpenRouter
@@ -300,6 +303,14 @@ def extract_from_file(
             When provided on the image path, the primary image plus each extra
             are packed into a single multi-image vision call. The caller is
             responsible for enforcing the MAX_ALBUM_IMAGES cap.
+        db_path: optional path to the user's SQLite DB. When provided on the
+            dense-text PDF path, layout learning (Phase 11) is applied: a stored
+            relevant-page template is used to filter pages before the LLM call,
+            or — on a first sighting — relevant pages are detected and the
+            template is learned for next time.
+        practice_id: optional practice id used as the layout-template key. Often
+            unknown at extraction time; defaults to None (the practice-agnostic
+            template slot).
 
     Returns:
         ExtractionResult on success, or None on any failure (logged).
@@ -341,7 +352,30 @@ def extract_from_file(
                     prompt, _hint = _select_prompt(text)
                     messages = _build_text_message(prompt, text)
             else:
-                prompt, _hint = _select_prompt(text)
+                # Dense-text branch: apply Phase 11 layout learning before
+                # building the LLM message, so filler pages are dropped from the
+                # payload. doc_type_hint keys the learned template.
+                prompt, doc_type_hint = _select_prompt(text)
+                if db_path is not None:
+                    stored = load_template(db_path, doc_type_hint, practice_id)
+                    if stored is not None:
+                        valid_indices = [i for i in stored if i < len(per_page_texts)]
+                        if valid_indices:
+                            per_page_texts = [per_page_texts[i] for i in valid_indices]
+                            text = "\n".join(per_page_texts).strip()
+                        # If every stored index is out of bounds, fall back to
+                        # all pages (no filtering) — never raise IndexError.
+                    else:
+                        relevant = detect_relevant_pages(per_page_texts)
+                        if relevant:
+                            per_page_texts = [per_page_texts[i] for i in relevant]
+                            text = "\n".join(per_page_texts).strip()
+                        update_template(
+                            db_path,
+                            doc_type_hint,
+                            practice_id,
+                            relevant if relevant else list(range(page_count)),
+                        )
                 messages = _build_text_message(prompt, text)
 
         elif kind == "image":

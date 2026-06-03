@@ -131,7 +131,11 @@ async def ingest_document(
 
         # Step 2: extract structured data via vision LLM.
         extraction: Optional[ExtractionResult] = await asyncio.to_thread(
-            extract_from_file, file_path, mime_type, extra_image_bytes
+            extract_from_file,
+            file_path,
+            mime_type,
+            extra_image_bytes,
+            db_path,
         )
         if extraction is None:
             logger.warning(

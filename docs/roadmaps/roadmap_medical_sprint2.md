@@ -105,7 +105,7 @@ Users can now correct numbered items in a confirmation message by replying `<num
 ## Phase 11: Document Intelligence — Layout Learning
 **What's true when this is done:** On the second EOB ingestion from the same practice, Luigi skips blank/boilerplate pages and sends only content-bearing pages to the vision model. The learned page range is stored per `(doc_type, practice_id)` and reused automatically. First-time ingestion auto-detects relevant pages using text-density scoring and persists the result.
 
-- [ ] Add `document_templates` table to `src/database.py` `init_db()`:
+- [x] Add `document_templates` table to `src/database.py` `init_db()`:
   ```sql
   CREATE TABLE IF NOT EXISTS document_templates (
       id              INTEGER PRIMARY KEY,
@@ -118,14 +118,39 @@ Users can now correct numbered items in a confirmation message by replying `<num
       UNIQUE(doc_type, practice_id)
   )
   ```
-- [ ] Write `src/medical/layout.py` with:
+- [x] Write `src/medical/layout.py` with:
   - `score_page_relevance(page_text: str) -> float` — ratio of non-whitespace chars to total chars; 0.0 = blank, 1.0 = dense
   - `detect_relevant_pages(pages: list[str], threshold: float = 0.05) -> list[int]` — returns indices of pages whose score exceeds threshold; excludes leading and trailing blank pages
   - `load_template(db_path: str, doc_type: str, practice_id: Optional[int]) -> Optional[list[int]]` — returns stored relevant page indices or `None`
   - `update_template(db_path: str, doc_type: str, practice_id: Optional[int], observed_pages: list[int]) -> None` — upsert; on conflict, expand the stored range to the union of stored and observed (conservative: never drop a page seen in prior samples); increment `sample_count`
-- [ ] In `src/medical/extraction.py`: after reading PDF pages, call `load_template` → if found, filter `pages` list to stored indices before building the extraction payload; if not found, call `detect_relevant_pages` on all pages, filter to detected range, then call `update_template` to persist it for next time
-- [ ] Extend `extract_from_file` to accept an optional `db_path: Optional[str]` and `practice_id: Optional[int]` so the template lookup has the right keys; callers that don't need layout learning can pass `None`
-- [ ] Write tests: `score_page_relevance` returns 0.0 for blank page, >0.5 for dense page; `detect_relevant_pages` strips leading and trailing blanks; `update_template` union-expands on second call; extraction uses stored range on second call (mock `load_template`); extraction stores template on first call (mock `update_template`, assert called)
+- [x] In `src/medical/extraction.py`: after reading PDF pages, call `load_template` → if found, filter `pages` list to stored indices before building the extraction payload; if not found, call `detect_relevant_pages` on all pages, filter to detected range, then call `update_template` to persist it for next time
+- [x] Extend `extract_from_file` to accept an optional `db_path: Optional[str]` and `practice_id: Optional[int]` so the template lookup has the right keys; callers that don't need layout learning can pass `None`
+- [x] Write tests: `score_page_relevance` returns 0.0 for blank page, >0.5 for dense page; `detect_relevant_pages` strips leading and trailing blanks; `update_template` union-expands on second call; extraction uses stored range on second call (mock `load_template`); extraction stores template on first call (mock `update_template`, assert called)
+
+### Handoff — Phase 11
+**Completed:** 2026-06-03
+**Branch:** main
+**Tests:** pytest tests/ -x -q → 232 passed
+
+#### What was built
+Luigi now learns which pages of a multi-page EOB carry real content and skips filler pages (cover sheets, blank backs, boilerplate) on subsequent extractions. On the first ingestion of a given doc type, `detect_relevant_pages` runs text-density scoring across all pages, the relevant page range is persisted to a new `document_templates` table, and the filtered text is sent to the LLM. On subsequent ingestions, the stored template is loaded and applied directly, reducing LLM payload size. The unique index uses `COALESCE(practice_id, 0)` to safely handle the NULL practice_id case (practice matching occurs after extraction, so v1 templates are keyed per `(doc_type, NULL)` — one template per doc type per user).
+
+#### Files changed
+- `src/database.py` — added `document_templates` table + `uq_document_templates_doc_type_practice` expression-based unique index (`COALESCE(practice_id, 0)`) to `init_db()`
+- `src/medical/layout.py` — new module: `score_page_relevance`, `detect_relevant_pages` (strips leading/trailing blanks, keeps sandwiched pages), `load_template` (NULL-safe query), `update_template` (sorted-union upsert)
+- `src/medical/extraction.py` — added `db_path` and `practice_id` optional params to `extract_from_file`; layout learning runs only in the dense-text PDF branch (after the sparse check); out-of-bounds stored indices fall back to all pages
+- `src/medical/ingestion.py` — `ingest_document` passes `db_path` through to `extract_from_file`
+- `tests/test_medical_extraction.py` — 9 new Phase 11 tests (5 unit for layout.py, 4 integration for extract_from_file)
+
+#### How to verify manually
+1. Send any text-layer EOB PDF for the first time — confirm extraction succeeds and `document_templates` has a new row for the doc type
+2. Send the same issuer's EOB PDF again — confirm extraction succeeds (template reused, only relevant pages in the LLM payload)
+3. Send a scanned-only EOB PDF — confirm rasterization path is taken and no template interaction occurs
+4. Check `document_templates` in the user's SQLite DB: `SELECT doc_type, relevant_pages, sample_count FROM document_templates;`
+
+#### Open questions / deferred decisions
+- **Template keying by practice:** `practice_id` is always `None` at extraction time (practice matching happens after extraction). Templates are keyed `(doc_type, NULL)` for now — one per doc type per user. If per-practice layouts diverge noticeably, backfill templates by practice after commit and re-key. Tracked in Blockers.
+- **Template keying by insurer:** the Blockers section already tracks the fallback lookup chain `(doc_type, practice_id)` → `(doc_type, insurer_id)` → `(doc_type, NULL)` — deferred until second insurer.
 
 ---
 

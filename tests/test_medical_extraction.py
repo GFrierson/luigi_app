@@ -419,3 +419,158 @@ def test_multi_image_album_produces_single_extraction(tmp_path):
         )
 
     assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: document layout learning (src/medical/layout.py + extraction hook)
+# ---------------------------------------------------------------------------
+
+from src.medical.layout import (  # noqa: E402
+    detect_relevant_pages,
+    load_template,
+    score_page_relevance,
+    update_template,
+)
+
+
+def test_score_page_relevance_blank():
+    """An empty page scores 0.0 (no ZeroDivisionError)."""
+    assert score_page_relevance("") == 0.0
+
+
+def test_score_page_relevance_dense():
+    """A page of 100 non-whitespace chars scores above 0.5."""
+    assert score_page_relevance("x" * 100) > 0.5
+
+
+def test_detect_relevant_pages_strips_blanks():
+    """Leading and trailing blank pages are stripped from the relevant span."""
+    pages = ["", "content here with many chars", "more content", ""]
+    assert detect_relevant_pages(pages) == [1, 2]
+
+
+def test_detect_relevant_pages_all_blank_returns_empty():
+    """An all-blank document yields no relevant pages."""
+    assert detect_relevant_pages(["", "", ""]) == []
+
+
+def test_update_template_union_expands_on_second_call(tmp_path):
+    """Two updates with overlapping page sets persist their sorted union."""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+
+    update_template(db_path, "eob", None, [0, 1])
+    update_template(db_path, "eob", None, [1, 2])
+
+    assert load_template(db_path, "eob", None) == [0, 1, 2]
+
+
+def _capturing_openai_client() -> tuple[MagicMock, dict]:
+    """
+    OpenAI class mock that records the `messages` payload of the LLM call so
+    tests can assert which page text reached the model. Returns
+    (mock_openai, captured) where captured['messages'] holds the last payload.
+    """
+    captured: dict = {}
+
+    def _create(*args, **kwargs):
+        captured["messages"] = kwargs["messages"]
+        completion = MagicMock()
+        completion.choices[0].message.content = _VALID_EXTRACTION_JSON
+        return completion
+
+    mock_openai = MagicMock()
+    mock_openai.return_value.chat.completions.create.side_effect = _create
+    return mock_openai, captured
+
+
+def test_extraction_uses_stored_range():
+    """A stored template restricts the LLM payload to the learned pages."""
+    mock_openai, captured = _capturing_openai_client()
+    pages = ["PAGE_ZERO_TEXT " * 40, "PAGE_ONE_TEXT " * 40]
+    full_text = "\n".join(pages)
+
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", mock_openai
+    ), patch(
+        "src.medical.extraction._extract_pdf_text",
+        return_value=(full_text, pages),
+    ), patch(
+        "src.medical.extraction.load_template", return_value=[1]
+    ):
+        result = extract_from_file("/tmp/x.pdf", "application/pdf", db_path="fake")
+
+    assert result is not None
+    payload = str(captured["messages"])
+    assert "PAGE_ONE_TEXT" in payload
+    assert "PAGE_ZERO_TEXT" not in payload
+
+
+def test_extraction_stores_template_on_first_call():
+    """With no stored template, extraction learns and persists one."""
+    mock_openai, _captured = _capturing_openai_client()
+    pages = ["PAGE_ZERO_TEXT " * 40, "PAGE_ONE_TEXT " * 40]
+    full_text = "\n".join(pages)
+
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", mock_openai
+    ), patch(
+        "src.medical.extraction._extract_pdf_text",
+        return_value=(full_text, pages),
+    ), patch(
+        "src.medical.extraction.load_template", return_value=None
+    ), patch(
+        "src.medical.extraction.update_template"
+    ) as mock_update:
+        extract_from_file("/tmp/x.pdf", "application/pdf", db_path="fake")
+
+    mock_update.assert_called_once()
+
+
+def test_extraction_skips_layout_when_no_db_path():
+    """Without db_path, no layout template is consulted."""
+    mock_openai, _captured = _capturing_openai_client()
+    pages = ["PAGE_ZERO_TEXT " * 40, "PAGE_ONE_TEXT " * 40]
+    full_text = "\n".join(pages)
+
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", mock_openai
+    ), patch(
+        "src.medical.extraction._extract_pdf_text",
+        return_value=(full_text, pages),
+    ), patch(
+        "src.medical.extraction.load_template"
+    ) as mock_load:
+        extract_from_file("/tmp/x.pdf", "application/pdf")
+
+    mock_load.assert_not_called()
+
+
+def test_extraction_stored_indices_out_of_bounds_falls_back():
+    """Stored indices beyond the page count fall back to all pages, no IndexError."""
+    mock_openai, captured = _capturing_openai_client()
+    pages = ["PAGE_ZERO_TEXT " * 40, "PAGE_ONE_TEXT " * 40]
+    full_text = "\n".join(pages)
+
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", mock_openai
+    ), patch(
+        "src.medical.extraction._extract_pdf_text",
+        return_value=(full_text, pages),
+    ), patch(
+        "src.medical.extraction.load_template", return_value=[10, 11]
+    ):
+        result = extract_from_file("/tmp/x.pdf", "application/pdf", db_path="fake")
+
+    assert result is not None
+    payload = str(captured["messages"])
+    assert "PAGE_ZERO_TEXT" in payload
+    assert "PAGE_ONE_TEXT" in payload

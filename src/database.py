@@ -202,6 +202,29 @@ def init_db(db_path: str) -> None:
         )
     """)
 
+    # Phase 11: learned per-(doc_type, practice) relevant-page templates.
+    # NOTE: UNIQUE(doc_type, practice_id) as a table constraint is unsafe here
+    # because SQLite treats NULLs as distinct in UNIQUE indexes, which would
+    # allow unbounded duplicate rows when practice_id IS NULL. Instead we define
+    # the table without that constraint and add a separate expression index that
+    # collapses NULL practice_id to the sentinel 0 (no real practice id is 0,
+    # since AUTOINCREMENT starts at 1).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS document_templates (
+            id              INTEGER PRIMARY KEY,
+            doc_type        TEXT NOT NULL,
+            practice_id     INTEGER REFERENCES practices(id),
+            relevant_pages  TEXT NOT NULL,
+            sample_count    INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_document_templates_doc_type_practice "
+        "ON document_templates(doc_type, COALESCE(practice_id, 0))"
+    )
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS providers (
             id   INTEGER PRIMARY KEY AUTOINCREMENT,
