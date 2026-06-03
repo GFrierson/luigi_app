@@ -2,6 +2,8 @@
 agent_instructions/
 .env
 *.csv
+experiments/medical/*/sample/
+!experiments/medical/*/annotations.csv
 .env*
 claude/
 vps_rebuild.md

@@ -574,3 +574,123 @@ def test_extraction_stored_indices_out_of_bounds_falls_back():
     payload = str(captured["messages"])
     assert "PAGE_ZERO_TEXT" in payload
     assert "PAGE_ONE_TEXT" in payload
+
+
+# ---------------------------------------------------------------------------
+# Phase 13: insurer detection + deterministic-extractor dispatch
+# ---------------------------------------------------------------------------
+
+from src.medical.extraction import _detect_insurer  # noqa: E402
+
+# Dense anthem-labelled text that clears SPARSE_TEXT_THRESHOLD on the single
+# page, routing extract_from_file into the dense-text dispatch branch.
+_ANTHEM_DENSE_TEXT = "Anthem Blue Cross Blue Shield of Georgia EOB " * 10
+
+
+def test_detect_insurer_anthem_text():
+    """Anthem brand phrases (full BCBS-of-Georgia and bare 'BCBS') map to 'anthm'."""
+    assert (
+        _detect_insurer("Anthem Blue Cross Blue Shield of Georgia EOB") == "anthm"
+    )
+    assert _detect_insurer("BCBS Summary") == "anthm"
+
+
+def test_detect_insurer_returns_none_for_unknown():
+    """An unrecognized insurer name yields None."""
+    assert _detect_insurer("Cigna Healthcare Member EOB") is None
+
+
+def test_dispatch_routes_to_registered_extractor():
+    """A registered extractor producing a result short-circuits the LLM call."""
+    stub_result = ExtractionResult(
+        doc_type="eob",
+        document_date=None,
+        practices=[],
+        providers=[],
+        claims=[],
+        adjudications=[],
+    )
+    stub_module = MagicMock()
+    stub_module.extract.return_value = stub_result
+
+    mock_openai = _mock_openai_client()
+
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", mock_openai
+    ), patch(
+        "src.medical.extraction._extract_pdf_text",
+        return_value=(_ANTHEM_DENSE_TEXT, [_ANTHEM_DENSE_TEXT]),
+    ), patch(
+        "src.medical.extraction.EXTRACTOR_ALLOWLIST",
+        [
+            {
+                "insurer": "anthm",
+                "doc_type": "eob",
+                "extractor_version": "anthm_eob_v1",
+                "module": "anthm_eob",
+            }
+        ],
+    ), patch(
+        "src.medical.extraction.importlib.import_module", return_value=stub_module
+    ):
+        result = extract_from_file("/tmp/x.pdf", "application/pdf")
+
+    assert result is stub_result
+    stub_module.extract.assert_called_once()
+    mock_openai.return_value.chat.completions.create.assert_not_called()
+
+
+def test_dispatch_falls_through_to_llm_when_unregistered():
+    """With an empty allowlist, anthem text still routes to the LLM."""
+    mock_openai = _mock_openai_client()
+
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", mock_openai
+    ), patch(
+        "src.medical.extraction._extract_pdf_text",
+        return_value=(_ANTHEM_DENSE_TEXT, [_ANTHEM_DENSE_TEXT]),
+    ), patch(
+        "src.medical.extraction.EXTRACTOR_ALLOWLIST", []
+    ):
+        result = extract_from_file("/tmp/x.pdf", "application/pdf")
+
+    assert result is not None
+    mock_openai.return_value.chat.completions.create.assert_called_once()
+
+
+def test_dispatch_falls_through_to_llm_when_extractor_returns_none():
+    """A registered extractor returning None falls through to the LLM."""
+    stub_module = MagicMock()
+    stub_module.extract.return_value = None
+
+    mock_openai = _mock_openai_client()
+
+    with patch(
+        "src.medical.extraction.get_settings", return_value=_mock_settings()
+    ), patch(
+        "src.medical.extraction.OpenAI", mock_openai
+    ), patch(
+        "src.medical.extraction._extract_pdf_text",
+        return_value=(_ANTHEM_DENSE_TEXT, [_ANTHEM_DENSE_TEXT]),
+    ), patch(
+        "src.medical.extraction.EXTRACTOR_ALLOWLIST",
+        [
+            {
+                "insurer": "anthm",
+                "doc_type": "eob",
+                "extractor_version": "anthm_eob_v1",
+                "module": "anthm_eob",
+            }
+        ],
+    ), patch(
+        "src.medical.extraction.importlib.import_module", return_value=stub_module
+    ):
+        result = extract_from_file("/tmp/x.pdf", "application/pdf")
+
+    assert result is not None
+    stub_module.extract.assert_called_once()
+    mock_openai.return_value.chat.completions.create.assert_called_once()

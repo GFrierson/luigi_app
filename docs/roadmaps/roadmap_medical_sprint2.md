@@ -197,19 +197,45 @@ When an incoming EOB's claim has no exact match-key hit but a prior `submitted` 
 ## Phase 13: Extractor Infrastructure — Dispatch Router + Annotation Harness
 **What's true when this is done:** A new `src/medical/extractors/` package exists with an allowlist-based dispatch layer. `extract_from_file()` checks `(insurer, doc_type)` against the allowlist and routes to a registered deterministic extractor before falling back to the LLM — so existing behavior is completely unchanged until a Phase 14/15 extractor clears its gate. A shared eval runner script exists that runs all gated extractors, confirms no regressions, and exits non-zero if any fail. The `experiments/medical/` directory tree and annotation CSV conventions are documented. This phase ships zero extractor logic — only the infrastructure that Phases 14 and 15 build on.
 
-- [ ] Create `src/medical/extractors/__init__.py` (empty package marker)
-- [ ] Create `src/medical/extractors/allowlist.py`:
+- [x] Create `src/medical/extractors/__init__.py` (empty package marker)
+- [x] Create `src/medical/extractors/allowlist.py`:
   ```python
   # Each entry: { "insurer": str, "doc_type": str, "extractor_version": str }
   EXTRACTOR_ALLOWLIST: list[dict] = []
   ```
   Start empty; each new extractor appends its entry here after clearing its gate.
-- [ ] Add `_detect_insurer(text: str) -> Optional[str]` helper to `src/medical/extraction.py` — scans lowercased first-page text for insurer-identifying phrases before dispatching. Initial entries: `"anthem"` / `"blue cross blue shield of georgia"` / `"bcbs"` → `"anthm"`. Returns `None` if no match. Extend the mapping as new extractors are added.
-- [ ] Refactor `extract_from_file()` in `src/medical/extraction.py` to call `_detect_insurer(text)` after the pypdf text pass, then check `EXTRACTOR_ALLOWLIST` for a matching `(insurer, doc_type)` entry. If found, import and call that extractor's `extract(text)` and return the result; if not found (or if the deterministic extractor returns `None`), fall through to the existing LLM call unchanged.
-- [ ] Add `"check"` to the `doc_type` literal in `ExtractionResult` and `EOB_PROMPT` so Anthem check PDFs can be classified as a distinct doc type from `"eob"`.
-- [ ] Create `src/medical/scripts/run_all_extractor_evals.py` — shared runner: imports `run_eval()` from each registered extractor's eval script, runs them in sequence, prints a summary table (extractor × field: N, precision %, PASS / FAIL / SKIP), exits 1 if any FAIL. Initially no registered evals; add one line per eval script as Phases 14/15 complete.
-- [ ] Create directory skeleton: `experiments/medical/` with a `README.md` describing the annotation CSV format (`file_path`, `_true_{field}`, `_hyp_{field}`, `_review_status`). **Do not commit the sample PDFs** — commit only the annotation CSVs (field values only, no raw document content).
-- [ ] Write tests: `_detect_insurer` returns `"anthm"` on Anthem text, `None` on unrecognized text; dispatch routes to a registered extractor (stub); unregistered `(insurer, doc_type)` falls through to LLM unchanged; `run_all_extractor_evals.py` exits 0 with no registered evals.
+- [x] Add `_detect_insurer(text: str) -> Optional[str]` helper to `src/medical/extraction.py` — scans lowercased first-page text for insurer-identifying phrases before dispatching. Initial entries: `"anthem"` / `"blue cross blue shield of georgia"` / `"bcbs"` → `"anthm"`. Returns `None` if no match. Extend the mapping as new extractors are added.
+- [x] Refactor `extract_from_file()` in `src/medical/extraction.py` to call `_detect_insurer(text)` after the pypdf text pass, then check `EXTRACTOR_ALLOWLIST` for a matching `(insurer, doc_type)` entry. If found, import and call that extractor's `extract(text)` and return the result; if not found (or if the deterministic extractor returns `None`), fall through to the existing LLM call unchanged.
+- [x] Add `"check"` to the `doc_type` literal in `ExtractionResult` and `EOB_PROMPT` so Anthem check PDFs can be classified as a distinct doc type from `"eob"`.
+- [x] Create `src/medical/scripts/run_all_extractor_evals.py` — shared runner: imports `run_eval()` from each registered extractor's eval script, runs them in sequence, prints a summary table (extractor × field: N, precision %, PASS / FAIL / SKIP), exits 1 if any FAIL. Initially no registered evals; add one line per eval script as Phases 14/15 complete.
+- [x] Create directory skeleton: `experiments/medical/` with a `README.md` describing the annotation CSV format (`file_path`, `_true_{field}`, `_hyp_{field}`, `_review_status`). **Do not commit the sample PDFs** — commit only the annotation CSVs (field values only, no raw document content).
+- [x] Write tests: `_detect_insurer` returns `"anthm"` on Anthem text, `None` on unrecognized text; dispatch routes to a registered extractor (stub); unregistered `(insurer, doc_type)` falls through to LLM unchanged; `run_all_extractor_evals.py` exits 0 with no registered evals.
+
+### Handoff — Phase 13
+**Completed:** 2026-06-03
+**Branch:** main
+**Tests:** pytest tests/ -x -q → 247 passed (5 new)
+
+#### What was built
+A `src/medical/extractors/` package scaffold provides the allowlist-based dispatch infrastructure that Phases 14 and 15 will build on. `extract_from_file()` now detects the insurer from the original PDF text via `_detect_insurer` (scanning a `_INSURER_PHRASE_MAP` for Anthem-family phrases → `"anthm"`), then iterates `EXTRACTOR_ALLOWLIST` for any matching `insurer` entries. If a registered deterministic extractor returns a non-None result, the LLM call is skipped; if it returns `None` or raises, the LLM path is unchanged. The allowlist starts empty so all existing behaviour is unaffected. `run_all_extractor_evals.py` exits 0 with no registered evals and is ready for Phase 14/15 entries.
+
+#### Files changed
+- `src/medical/extractors/__init__.py` — new empty package marker
+- `src/medical/extractors/allowlist.py` — `EXTRACTOR_ALLOWLIST: list[dict] = []` with entry-shape docs; no src.* imports (avoids circular import with extraction.py)
+- `src/medical/extraction.py` — added `import importlib`; added `EXTRACTOR_ALLOWLIST` import; added `_INSURER_PHRASE_MAP` and `_detect_insurer(text) -> Optional[str]`; extended `ExtractionResult.doc_type` Literal with `"check"` (+ Phase 15 TODO comment on DB CHECK constraint); updated `_JSON_SCHEMA_HINT` doc_type union; inserted dispatch block in dense-text branch (insurer detected on pre-filter text, extractors receive post-filter text)
+- `src/medical/scripts/run_all_extractor_evals.py` — new shared runner with empty `_REGISTERED_EVALS`, `run_all() -> bool`, exits 0/1
+- `experiments/medical/README.md` — annotation CSV format and directory layout documentation
+- `.gitignore` — added `experiments/medical/*/sample/` and `!experiments/medical/*/annotations.csv` (exception after `*.csv` rule)
+- `tests/test_medical_extraction.py` — 5 new Phase 13 tests
+
+#### How to verify manually
+1. `python -m src.medical.scripts.run_all_extractor_evals` — prints "No registered evals. Pass." and exits 0
+2. Send any EOB to the bot — confirm behaviour is unchanged (allowlist is empty, LLM always called)
+3. `grep -r "EXTRACTOR_ALLOWLIST" src/` — confirm only allowlist.py defines it and extraction.py imports it
+
+#### Open questions / deferred decisions
+- **`documents.doc_type` CHECK constraint:** SQLite `CREATE TABLE IF NOT EXISTS` does not modify existing tables. Adding `"check"` to the Pydantic Literal is done, but the DB CHECK constraint (`eob|statement|receipt|other`) still needs a full table-recreate migration. A `# TODO Phase 15` comment marks the location. Until the migration runs, an extractor emitting `doc_type="check"` will pass Pydantic validation but fail at the DB insert. Deferred to Phase 15.
+- **Dispatch by insurer only (not `(insurer, doc_type)`):** the allowlist is iterated by insurer match; each extractor decides whether the doc is in scope by returning `None`. This means multiple extractors for the same insurer are tried in allowlist order — document insertion order matters for performance once more than one extractor per insurer is registered.
 
 ---
 

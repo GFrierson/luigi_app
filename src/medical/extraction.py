@@ -27,6 +27,7 @@ Design notes:
 """
 
 import base64
+import importlib
 import io
 import logging
 import os
@@ -37,9 +38,37 @@ from pydantic import BaseModel, ValidationError
 from pypdf import PdfReader
 
 from src.config import get_settings
+from src.medical.extractors.allowlist import EXTRACTOR_ALLOWLIST
 from src.medical.layout import detect_relevant_pages, load_template, update_template
 
 logger = logging.getLogger(__name__)
+
+
+# Coarse insurer detection for deterministic-extractor dispatch (Phase 13).
+# Valid insurer keys are the right-hand values here; allowlist entries must
+# reference one of them. Expand with real EOB brand names as needed.
+_INSURER_PHRASE_MAP: list[tuple[str, str]] = [
+    ("blue cross blue shield of georgia", "anthm"),
+    ("anthem", "anthm"),
+    ("bcbs", "anthm"),
+]
+
+
+def _detect_insurer(text: str) -> Optional[str]:
+    """
+    Return the insurer key whose phrase appears in `text`, or None.
+
+    Never raises — returns None on any error.
+    """
+    try:
+        lowered = text.lower()
+        for phrase, insurer in _INSURER_PHRASE_MAP:
+            if phrase in lowered:
+                return insurer
+        return None
+    except Exception:
+        logger.error("_detect_insurer: unexpected failure", exc_info=True)
+        return None
 
 # Below this many characters of extracted text *per page*, a PDF is treated as
 # scanned/sparse and routed to the rasterization (vision) path instead of text.
@@ -83,8 +112,9 @@ class ExtractedAdjudication(BaseModel):
 class ExtractionResult(BaseModel):
     # Must align with the documents.doc_type CHECK constraint values
     # ('eob','statement','receipt','other'). 'other' is intentionally excluded
-    # here — extraction always categorizes into one of the three known kinds.
-    doc_type: Literal["statement", "eob", "receipt"]
+    # here — extraction always categorizes into one of the known kinds.
+    # TODO Phase 15: extend documents.doc_type CHECK constraint to include 'check'
+    doc_type: Literal["statement", "eob", "receipt", "check"]
     document_date: Optional[str] = None
     practices: list[ExtractedPractice] = []
     providers: list[ExtractedProvider] = []
@@ -99,7 +129,7 @@ class ExtractionResult(BaseModel):
 
 _JSON_SCHEMA_HINT = """Return ONLY a JSON object with this shape (no prose, no markdown fences):
 {
-  "doc_type": "statement" | "eob" | "receipt",
+  "doc_type": "eob|statement|receipt|check",
   "document_date": "YYYY-MM-DD" | null,
   "practices": [{"name": "...", "aliases": ["..."]}],
   "providers": [{"name": "...", "aliases": ["..."]}],
@@ -355,6 +385,10 @@ def extract_from_file(
                 # Dense-text branch: apply Phase 11 layout learning before
                 # building the LLM message, so filler pages are dropped from the
                 # payload. doc_type_hint keys the learned template.
+                #
+                # Detect the insurer on the ORIGINAL full text (before layout
+                # filtering) so brand phrases on dropped pages still count.
+                insurer = _detect_insurer(text)
                 prompt, doc_type_hint = _select_prompt(text)
                 if db_path is not None:
                     stored = load_template(db_path, doc_type_hint, practice_id)
@@ -376,6 +410,39 @@ def extract_from_file(
                             practice_id,
                             relevant if relevant else list(range(page_count)),
                         )
+
+                # Phase 13: deterministic-extractor dispatch. If the insurer is
+                # recognized and has registered extractor(s), try each one with
+                # the post-layout-filter `text`. A non-None result short-circuits
+                # the LLM call; any failure or None falls through to the LLM.
+                if insurer is not None and EXTRACTOR_ALLOWLIST:
+                    for entry in EXTRACTOR_ALLOWLIST:
+                        if entry["insurer"] == insurer:
+                            try:
+                                module = importlib.import_module(
+                                    f"src.medical.extractors.{entry['module']}"
+                                )
+                                det_result = module.extract(text)
+                                if det_result is not None:
+                                    logger.info(
+                                        "extract_from_file: deterministic extractor "
+                                        "'%s' produced result; skipping LLM.",
+                                        entry["extractor_version"],
+                                    )
+                                    return det_result
+                                logger.warning(
+                                    "extract_from_file: extractor '%s' returned None; "
+                                    "falling through to LLM.",
+                                    entry["extractor_version"],
+                                )
+                            except Exception:
+                                logger.error(
+                                    "extract_from_file: extractor '%s' raised "
+                                    "unexpectedly; falling through to LLM.",
+                                    entry["extractor_version"],
+                                    exc_info=True,
+                                )
+
                 messages = _build_text_message(prompt, text)
 
         elif kind == "image":
