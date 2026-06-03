@@ -244,6 +244,8 @@ A `src/medical/extractors/` package scaffold provides the allowlist-based dispat
 
 **Blocked by:** Phase 13 complete. Can start in parallel with Phases 9–12 — no dependency on scanned PDF rendering or claim-matching work.
 
+**Sample location:** `/Users/jgfrussell/Git/luigi-docs/Anthem EOBs/Standard EOB`
+
 **Playbook steps (follow Extractor Playbook above):**
 
 - [ ] **Sample** — collect N ≥ 15 Anthem EOB PDFs. Save to `experiments/medical/anthm_eob/sample/`. Note layout variants: single-claim vs. multi-claim, electronic delivery vs. paper-scan, standard EOB vs. coordination-of-benefits EOB.
