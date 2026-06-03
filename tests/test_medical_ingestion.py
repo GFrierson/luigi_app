@@ -6,7 +6,12 @@ import pytest
 
 from src.database import init_db
 from src.medical.claims import create_claim, find_by_match_key
-from src.medical.confirmation import apply_correction, parse_confirmation_reply
+from src.medical.confirmation import (
+    apply_correction,
+    build_confirmation_message,
+    parse_confirmation_reply,
+)
+from src.medical.claims import find_submitted_by_date_and_practice
 from src.medical.entities import (
     create_encounter,
     create_practice,
@@ -23,6 +28,7 @@ from src.medical.ingestion import (
     _pending_confirmations,
     commit_ingestion,
     handle_correction,
+    handle_link,
 )
 from src.medical.scripts.seed_sep23_fixture import seed
 
@@ -450,3 +456,198 @@ async def test_handle_correction_caps_at_three_rounds(db_path):
 
     # Pending must not advance to a fresh re-rendered round.
     assert _pending_confirmations[chat_id]["correction_rounds"] == 3  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Phase 12: amount-tolerance claim matching + link ambiguity prompt
+# ---------------------------------------------------------------------------
+
+
+def _make_link_pending(
+    practice_id: int,
+    suggested_link: list[dict],
+    practice_name: str = "Test Practice",
+    service_date: str = "2025-09-23",
+    billed_amount: float = 275.0,
+) -> dict:
+    """Build a pending where the single claim entry carries suggested_link."""
+    extracted_claim = ExtractedClaim(
+        service_date=service_date,
+        billed_amount=billed_amount,
+        practice_name=practice_name,
+    )
+    extraction = ExtractionResult(
+        doc_type="eob",
+        practices=[ExtractedPractice(name=practice_name)],
+        providers=[],
+        claims=[extracted_claim],
+        adjudications=[],
+    )
+    match_results = {
+        "practices": [
+            {"name": practice_name, "matched": True, "practice_id": practice_id},
+        ],
+        "claims": [
+            {
+                "service_date": service_date,
+                "matched": False,
+                "claim_id": None,
+                "suggested_link": suggested_link,
+                "match_type": "prior_bill",
+            },
+        ],
+    }
+    return {
+        "extraction": extraction,
+        "match_results": match_results,
+        "document_id": None,
+        "practice_id_by_name": {practice_name: practice_id},
+    }
+
+
+def test_parse_confirmation_reply_link_plain_returns_choice_zero():
+    result = parse_confirmation_reply("link", [])
+    assert result == {"action": "link", "choice": 0}
+
+
+def test_parse_confirmation_reply_link_numbered_returns_zero_based_choice():
+    result = parse_confirmation_reply("link 2", [])
+    assert result == {"action": "link", "choice": 1}
+
+
+def test_confirmation_message_renders_suggested_link_warning(db_path):
+    practice = create_practice(db_path, "Test Practice")
+    existing = create_claim(db_path, "2025-09-23", practice["id"], 250.0)
+    pending = _make_link_pending(
+        practice["id"],
+        suggested_link=[existing],
+        billed_amount=275.0,
+    )
+
+    message = build_confirmation_message(
+        pending["extraction"], pending["match_results"]
+    )
+
+    assert "prior bill" in message
+    assert "link" in message.lower()
+    # The link-pending item must NOT be rendered as a numbered correction slot.
+    assert "1. Claim" not in message
+
+
+@pytest.mark.asyncio
+async def test_link_reply_adjudicates_existing_claim_no_new_claim(db_path):
+    practice = create_practice(db_path, "Test Practice")
+    existing = create_claim(db_path, "2025-09-23", practice["id"], 250.0)
+    chat_id = 12345
+
+    pending = _make_link_pending(
+        practice["id"],
+        suggested_link=[existing],
+        billed_amount=275.0,
+    )
+    _pending_confirmations[chat_id] = pending
+
+    context = MagicMock()
+    context.bot.send_message = AsyncMock()
+
+    await handle_link(db_path, chat_id, pending, {"action": "link", "choice": 0}, context)
+
+    # No new claim should have been created — only the original exists.
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+    conn.close()
+    assert count == 1
+
+    # The pending entry was patched to point at the existing claim.
+    # (After commit, pending is cleared from the registry.)
+    assert chat_id not in _pending_confirmations
+
+    # The original claim still exists, untouched in identity.
+    still = find_by_match_key(db_path, "2025-09-23", practice["id"], 250.0)
+    assert still is not None
+    assert still["id"] == existing["id"]
+
+
+@pytest.mark.asyncio
+async def test_link_reply_out_of_range_choice_creates_no_claim(db_path):
+    practice = create_practice(db_path, "Test Practice")
+    existing = create_claim(db_path, "2025-09-23", practice["id"], 250.0)
+    chat_id = 12345
+
+    pending = _make_link_pending(
+        practice["id"],
+        suggested_link=[existing],
+        billed_amount=275.0,
+    )
+    _pending_confirmations[chat_id] = pending
+
+    context = MagicMock()
+    context.bot.send_message = AsyncMock()
+
+    # choice 1 (i.e., "link 2") is out of range for a single-candidate list.
+    await handle_link(db_path, chat_id, pending, {"action": "link", "choice": 1}, context)
+
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+    conn.close()
+    assert count == 1
+
+    # Pending is preserved so the user can retry.
+    assert chat_id in _pending_confirmations
+    context.bot.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_two_claims_same_date_different_amounts_both_resolve(db_path):
+    """Pre-matched same-date claims must commit without colliding on service_date."""
+    practice = create_practice(db_path, "Test Practice")
+    claim_a = create_claim(db_path, "2025-09-23", practice["id"], 250.0)
+    claim_b = create_claim(db_path, "2025-09-23", practice["id"], 300.0)
+    chat_id = 12345
+
+    extraction = ExtractionResult(
+        doc_type="eob",
+        practices=[ExtractedPractice(name="Test Practice")],
+        providers=[],
+        claims=[
+            ExtractedClaim(
+                service_date="2025-09-23",
+                billed_amount=250.0,
+                practice_name="Test Practice",
+            ),
+            ExtractedClaim(
+                service_date="2025-09-23",
+                billed_amount=300.0,
+                practice_name="Test Practice",
+            ),
+        ],
+        adjudications=[],
+    )
+    match_results = {
+        "practices": [
+            {"name": "Test Practice", "matched": True, "practice_id": practice["id"]},
+        ],
+        "claims": [
+            {"service_date": "2025-09-23", "matched": True, "claim_id": claim_a["id"]},
+            {"service_date": "2025-09-23", "matched": True, "claim_id": claim_b["id"]},
+        ],
+    }
+    pending = {
+        "extraction": extraction,
+        "match_results": match_results,
+        "document_id": None,
+        "practice_id_by_name": {"Test Practice": practice["id"]},
+    }
+
+    await commit_ingestion(db_path, chat_id, pending)
+
+    # Both original claims still exist with IDs unchanged; no new rows created.
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+    conn.close()
+    assert count == 2
+
+    still_a = find_by_match_key(db_path, "2025-09-23", practice["id"], 250.0)
+    still_b = find_by_match_key(db_path, "2025-09-23", practice["id"], 300.0)
+    assert still_a["id"] == claim_a["id"]
+    assert still_b["id"] == claim_b["id"]

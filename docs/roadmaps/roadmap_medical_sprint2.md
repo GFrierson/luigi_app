@@ -157,12 +157,40 @@ Luigi now learns which pages of a multi-page EOB carry real content and skips fi
 ## Phase 12: Claim Matching — Amount-Tolerance + Ambiguity Prompt
 **What's true when this is done:** Sending an EOB for a visit whose bill was already uploaded no longer silently creates a duplicate claim when the billed amounts differ. When an exact match fails but a `submitted` claim exists for the same `(service_date, practice_id)`, Luigi flags the ambiguity in the confirmation message and asks the user to link or treat as separate. The `matched_claims_by_date` collision bug for multi-claim same-date visits is also fixed.
 
-- [ ] In `src/medical/claims.py`: add `find_submitted_by_date_and_practice(db_path: str, service_date: str, practice_id: int) -> list[dict]` — returns all claims with `current_status = 'submitted'` for the given `(service_date, practice_id)`, ordered by `created_at`
-- [ ] In `src/medical/matching.py`: update `match_claim` — after `find_by_match_key` returns `None`, call `find_submitted_by_date_and_practice`; if one result is found, return it as a `suggested_link` (not `matched=True`) with `match_type='prior_bill'`; if multiple are found, return all as suggestions; if none, return unmatched as before
-- [ ] In `src/medical/confirmation.py`: update `build_confirmation_message` to render `suggested_link` entries distinctly — e.g. _"⚠️ No exact match, but a prior bill exists for this visit (billed $X on [date]). Reply `link` to connect this EOB to it, or `confirm` to create a separate claim."_
-- [ ] In `src/medical/ingestion.py`: handle the new `link` reply action from `parse_confirmation_reply` — set `existing_claim_id` to the suggested claim's id and proceed as a matched claim (adjudicate only, no new claim created); update `parse_confirmation_reply` in `confirmation.py` to recognise `link` as a valid keyword
-- [ ] Fix `matched_claims_by_date` in `commit_ingestion`: change the key from `service_date` to `(service_date, billed_amount)` so two claims for the same date but different amounts each resolve independently
-- [ ] Write tests: exact-match path unchanged; `find_submitted_by_date_and_practice` returns prior bill when amounts differ; confirmation message renders `suggested_link` warning; `link` reply adjudicates existing claim without creating a new one; two claims same date different amounts both resolve correctly after the key fix
+- [x] In `src/medical/claims.py`: add `find_submitted_by_date_and_practice(db_path: str, service_date: str, practice_id: int) -> list[dict]` — returns all claims with `current_status = 'submitted'` for the given `(service_date, practice_id)`, ordered by `created_at`
+- [x] In `src/medical/matching.py`: update `match_claim` — after `find_by_match_key` returns `None`, call `find_submitted_by_date_and_practice`; if one result is found, return it as a `suggested_link` (not `matched=True`) with `match_type='prior_bill'`; if multiple are found, return all as suggestions; if none, return unmatched as before
+- [x] In `src/medical/confirmation.py`: update `build_confirmation_message` to render `suggested_link` entries distinctly — e.g. _"⚠️ No exact match, but a prior bill exists for this visit (billed $X on [date]). Reply `link` to connect this EOB to it, or `confirm` to create a separate claim."_
+- [x] In `src/medical/ingestion.py`: handle the new `link` reply action from `parse_confirmation_reply` — set `existing_claim_id` to the suggested claim's id and proceed as a matched claim (adjudicate only, no new claim created); update `parse_confirmation_reply` in `confirmation.py` to recognise `link` as a valid keyword
+- [x] Fix `matched_claims_by_date` in `commit_ingestion`: change the key from `service_date` to `(service_date, billed_amount)` so two claims for the same date but different amounts each resolve independently
+- [x] Write tests: exact-match path unchanged; `find_submitted_by_date_and_practice` returns prior bill when amounts differ; confirmation message renders `suggested_link` warning; `link` reply adjudicates existing claim without creating a new one; two claims same date different amounts both resolve correctly after the key fix
+
+### Handoff — Phase 12
+**Completed:** 2026-06-03
+**Branch:** main
+**Tests:** pytest tests/ -x -q → 242 passed (10 new)
+
+#### What was built
+When an incoming EOB's claim has no exact match-key hit but a prior `submitted` bill exists for the same `(service_date, practice_id)`, the confirmation message now flags the ambiguity with a "Possible duplicate" block. The user can reply `link` (single candidate) or `link N` (multiple candidates) to attach the EOB adjudication to the existing claim without creating a duplicate, or `confirm` to create a separate claim. A same-date/different-amount key-collision bug in `commit_ingestion` and `rematch_after_correction` was also fixed by switching from service-date-keyed dicts to index-based pairing.
+
+#### Files changed
+- `src/medical/claims.py` — added `find_submitted_by_date_and_practice(db_path, service_date, practice_id) -> list[dict]` querying `current_status='submitted'` by `billing_practice_id`, ordered by `id ASC` (no `created_at` column in schema; id ordering gives equivalent oldest-first result)
+- `src/medical/matching.py` — `match_claim` falls back to the submitted-bill lookup and returns `{"matched": False, "suggested_link": [...], "match_type": "prior_bill"}` on ambiguity; `rematch_after_correction` now pairs claim_results to extraction.claims by list index instead of a date-keyed dict (fixes same-date collision)
+- `src/medical/confirmation.py` — `build_confirmation_message` renders a "Possible duplicate" section (no correction number, link-only resolution); `parse_confirmation_reply` parses `link`/`link N` into `{"action": "link", "choice": int}` (0-based); `apply_correction` skips `suggested_link` entries from the numbered action list
+- `src/medical/ingestion.py` — added `handle_link` async handler; `commit_ingestion` pairs match-results to claims by index (key-collision fix)
+- `src/telegram_handler.py` — imported `handle_link`; added `link` branch in `_on_message` alongside `correction`/`cancel`
+- `tests/test_medical_claims.py` — 4 tests: returns prior bill, returns multiple, excludes adjudicated, returns empty when no practice match
+- `tests/test_medical_ingestion.py` — 6 tests: link reply parsing, suggested-link message render, link adjudicates existing claim without creating new, out-of-range choice preserved, same-date different-amounts both resolve
+
+#### How to verify manually
+1. Upload a bill (creates a `submitted` claim)
+2. Send an EOB for the same visit with a different billed amount — confirm the confirmation shows the "Possible duplicate" warning with a `link` prompt instead of silently creating a second claim
+3. Reply `link` — confirm the adjudication attaches to the existing claim (no new claim row created)
+4. Reply `confirm` — confirm a separate claim is created as expected
+5. For multi-suggestion: two prior submitted claims on the same date — confirm `link 1` / `link 2` options are rendered
+
+#### Open questions / deferred decisions
+- **`ORDER BY id ASC` instead of `created_at`**: the `claims` table has no `created_at` column, so the approved "order by created_at" was implemented as `ORDER BY id ASC` (equivalent for insertion order). If a `created_at` column is added in a future migration, the query should be updated.
+- **`suggested_link` with 2+ candidates**: the full `link N` disambiguation round-trip is implemented, but the multi-candidate path has less test coverage than the single-candidate path. Add more fixture-based tests if edge cases surface in practice.
 
 ---
 

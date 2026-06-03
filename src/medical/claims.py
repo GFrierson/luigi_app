@@ -238,6 +238,55 @@ def find_by_match_key(
         conn.close()
 
 
+def find_submitted_by_date_and_practice(
+    db_path: str,
+    service_date: str,
+    practice_id: int,
+) -> list[dict]:
+    """
+    Find all claims still in 'submitted' status for a given service_date and
+    billing practice, regardless of billed_amount.
+
+    Used for amount-tolerant claim matching (Phase 12): when no exact match-key
+    hit exists, surface prior submitted bills for the same date+practice as
+    ambiguity candidates the user can link to.
+
+    Ordered by id ASC (insertion order, oldest first — the claims table has no
+    created_at column). Returns [] on failure or when no submitted claims exist.
+    Never raises.
+    """
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, service_date, billing_practice_id, encounter_id,
+                   insurer_id, billed_amount, current_status
+            FROM claims
+            WHERE current_status = 'submitted'
+              AND service_date = ?
+              AND billing_practice_id = ?
+            ORDER BY id ASC
+            """,
+            (service_date, practice_id),
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+        logger.debug(
+            f"find_submitted_by_date_and_practice: {len(rows)} submitted claim(s) "
+            f"service_date={service_date} practice_id={practice_id}"
+        )
+        return rows
+    except Exception:
+        logger.error(
+            f"Failed to find submitted claims service_date={service_date} "
+            f"practice_id={practice_id}",
+            exc_info=True,
+        )
+        return []
+    finally:
+        conn.close()
+
+
 def find_by_external_id(
     db_path: str,
     system: str,

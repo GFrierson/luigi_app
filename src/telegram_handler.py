@@ -23,6 +23,7 @@ from src.medical.ingestion import (
     handle_photo_group,
     commit_ingestion,
     handle_correction,
+    handle_link,
     _pending_confirmations,
 )
 from src.medical.confirmation import parse_confirmation_reply
@@ -625,6 +626,15 @@ async def _on_message(update: Update, context) -> None:
             except Exception:
                 logger.error(
                     f"_on_message: handle_correction failed for chat {chat_id}",
+                    exc_info=True,
+                )
+            return
+        elif action == "link":
+            try:
+                await handle_link(db_path, chat_id, pending, result, context)
+            except Exception:
+                logger.error(
+                    f"_on_message: handle_link failed for chat {chat_id}",
                     exc_info=True,
                 )
             return

@@ -176,11 +176,29 @@ async def ingest_document(
             matched_claim = await asyncio.to_thread(
                 match_claim, db_path, claim.service_date, pid, claim.billed_amount
             )
-            claim_match_results.append({
-                "service_date": claim.service_date,
-                "matched": matched_claim is not None,
-                "claim_id": matched_claim["id"] if matched_claim else None,
-            })
+            if matched_claim is None:
+                claim_match_results.append({
+                    "service_date": claim.service_date,
+                    "matched": False,
+                    "claim_id": None,
+                })
+            elif matched_claim.get("suggested_link"):
+                # Amount-tolerant ambiguity (Phase 12): prior submitted bill(s)
+                # exist for this date+practice but no exact amount match. Surface
+                # them as link candidates instead of auto-matching.
+                claim_match_results.append({
+                    "service_date": claim.service_date,
+                    "matched": False,
+                    "claim_id": None,
+                    "suggested_link": matched_claim["suggested_link"],
+                    "match_type": matched_claim.get("match_type", "prior_bill"),
+                })
+            else:
+                claim_match_results.append({
+                    "service_date": claim.service_date,
+                    "matched": True,
+                    "claim_id": matched_claim["id"],
+                })
 
         match_results = {
             "practices": practice_match_results,
@@ -339,6 +357,100 @@ async def handle_correction(
         )
 
 
+async def handle_link(
+    db_path: str,
+    chat_id: int,
+    pending: dict,
+    action: dict,
+    context,
+) -> None:
+    """
+    Resolve an amount-tolerance ambiguity by linking the pending claim to one of
+    its prior-bill candidates (Phase 12).
+
+    `action` shape: {"action": "link", "choice": int}  # 0-based index.
+
+    Finds the (single) claim match-result entry carrying a non-empty
+    `suggested_link`, patches it in place to point at the chosen prior claim
+    (matched=True, claim_id set, suggested_link cleared), stores the updated
+    pending back, commits the ingestion, and confirms to the user.
+
+    Never raises.
+    """
+    try:
+        choice = action.get("choice", 0)
+        if not isinstance(choice, int) or choice < 0:
+            choice = 0
+
+        match_results = pending.get("match_results", {}) or {}
+        claim_results = match_results.get("claims", []) or []
+
+        target_entry = None
+        for entry in claim_results:
+            if entry.get("suggested_link"):
+                target_entry = entry
+                break
+
+        if target_entry is None:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="There's nothing to link right now. Reply confirm to save.",
+                )
+            except Exception:
+                logger.error(
+                    f"handle_link: failed to send no-link notice to chat {chat_id}",
+                    exc_info=True,
+                )
+            return
+
+        suggested = target_entry.get("suggested_link") or []
+        if choice >= len(suggested):
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"There's no option {choice + 1} to link. "
+                        f"Reply \"link\" or \"link N\" with a valid number, or "
+                        f"\"confirm\" to create a separate claim."
+                    ),
+                )
+            except Exception:
+                logger.error(
+                    f"handle_link: failed to send invalid-choice notice to "
+                    f"chat {chat_id}",
+                    exc_info=True,
+                )
+            return
+
+        chosen = suggested[choice]
+        target_entry["matched"] = True
+        target_entry["claim_id"] = chosen["id"]
+        target_entry.pop("suggested_link", None)
+        target_entry.pop("match_type", None)
+
+        _pending_confirmations[chat_id] = pending
+
+        await commit_ingestion(db_path, chat_id, pending)
+        _pending_confirmations.pop(chat_id, None)
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Linked to the existing bill and saved.",
+            )
+        except Exception:
+            logger.error(
+                f"handle_link: failed to send confirmation to chat {chat_id}",
+                exc_info=True,
+            )
+    except Exception:
+        logger.error(
+            f"handle_link: unexpected failure for chat {chat_id}",
+            exc_info=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # commit_ingestion
 # ---------------------------------------------------------------------------
@@ -364,10 +476,15 @@ async def commit_ingestion(db_path: str, chat_id: int, pending: dict) -> None:
             "practice_id_by_name", {}
         )
 
-        # Build a quick lookup of which claims already matched.
-        matched_claims_by_date: dict[str, Optional[int]] = {}
-        for entry in match_results.get("claims", []):
-            matched_claims_by_date[entry["service_date"]] = (
+        # Pair each match-result with its extraction.claims entry by list index.
+        # Both lists are built in lockstep during ingestion, so index i refers
+        # to the same claim. Index pairing (not a service_date dict) avoids the
+        # collision where two same-date claims with different amounts would
+        # overwrite each other's matched claim_id (Phase 12).
+        claim_results: list[dict] = match_results.get("claims", []) or []
+        matched_claim_id_by_index: list[Optional[int]] = []
+        for entry in claim_results:
+            matched_claim_id_by_index.append(
                 entry["claim_id"] if entry.get("matched") else None
             )
 
@@ -396,7 +513,7 @@ async def commit_ingestion(db_path: str, chat_id: int, pending: dict) -> None:
 
         # Process each claim.
         committed_claim_ids: list[int] = []
-        for claim in extraction.claims:
+        for claim_index, claim in enumerate(extraction.claims):
             pname = claim.practice_name
             pid = practice_id_by_name.get(pname)
             if pid is None:
@@ -411,7 +528,11 @@ async def commit_ingestion(db_path: str, chat_id: int, pending: dict) -> None:
                 pid = created["id"]
                 practice_id_by_name[pname] = pid
 
-            existing_claim_id = matched_claims_by_date.get(claim.service_date)
+            existing_claim_id = (
+                matched_claim_id_by_index[claim_index]
+                if claim_index < len(matched_claim_id_by_index)
+                else None
+            )
             if existing_claim_id is not None:
                 claim_id = existing_claim_id
             else:

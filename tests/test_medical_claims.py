@@ -9,6 +9,7 @@ from src.medical.claims import (
     create_claim,
     find_by_external_id,
     find_by_match_key,
+    find_submitted_by_date_and_practice,
     get_claim_events,
 )
 from src.medical.entities import create_practice
@@ -164,6 +165,67 @@ def test_find_by_match_key_returns_none_for_wrong_amount(db_path, practice_id):
     )
     found = find_by_match_key(db_path, "2025-09-23", practice_id, 251.00)
     assert found is None
+
+
+# ---------------------------------------------------------------------------
+# find_submitted_by_date_and_practice (Phase 12)
+# ---------------------------------------------------------------------------
+
+def test_find_submitted_by_date_and_practice_returns_prior_bill(db_path, practice_id):
+    create_claim(
+        db_path,
+        service_date="2025-09-23",
+        billing_practice_id=practice_id,
+        billed_amount=250.00,
+    )
+    rows = find_submitted_by_date_and_practice(db_path, "2025-09-23", practice_id)
+    assert len(rows) == 1
+    assert rows[0]["billed_amount"] == 250.00
+    assert rows[0]["current_status"] == "submitted"
+    assert rows[0]["service_date"] == "2025-09-23"
+
+
+def test_find_submitted_by_date_and_practice_excludes_adjudicated(db_path, practice_id):
+    claim = create_claim(
+        db_path,
+        service_date="2025-09-23",
+        billing_practice_id=practice_id,
+        billed_amount=250.00,
+    )
+    adjudicate_claim(
+        db_path,
+        claim_id=claim["id"],
+        adjudication_date="2025-10-01",
+        allowed_amount=200.00,
+        plan_paid=160.00,
+        member_owed=40.00,
+    )
+    rows = find_submitted_by_date_and_practice(db_path, "2025-09-23", practice_id)
+    assert rows == []
+
+
+def test_find_submitted_by_date_and_practice_returns_multiple(db_path, practice_id):
+    create_claim(
+        db_path,
+        service_date="2025-09-23",
+        billing_practice_id=practice_id,
+        billed_amount=250.00,
+    )
+    create_claim(
+        db_path,
+        service_date="2025-09-23",
+        billing_practice_id=practice_id,
+        billed_amount=300.00,
+    )
+    rows = find_submitted_by_date_and_practice(db_path, "2025-09-23", practice_id)
+    assert len(rows) == 2
+    amounts = sorted(r["billed_amount"] for r in rows)
+    assert amounts == [250.00, 300.00]
+
+
+def test_find_submitted_by_date_and_practice_returns_empty_when_none(db_path, practice_id):
+    rows = find_submitted_by_date_and_practice(db_path, "2025-09-23", practice_id)
+    assert rows == []
 
 
 # ---------------------------------------------------------------------------

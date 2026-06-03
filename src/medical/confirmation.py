@@ -78,6 +78,10 @@ def build_confirmation_message(
 
     matched_lines: list[str] = []
     action_lines: list[str] = []
+    # Link-pending lines render inline WITHOUT a correction number so they can
+    # never be targeted by a "<number> <correction>" reply (Phase 12).
+    link_lines: list[str] = []
+    has_link_pending = False
     action_index = 0
 
     # Practices
@@ -98,8 +102,39 @@ def build_confirmation_message(
         billed = claim_billed_by_date.get(sd)
         billed_str = _format_amount(billed)
         date_short = _format_date_short(sd)
+        suggested = entry.get("suggested_link") or []
         if entry.get("matched"):
             matched_lines.append(f"  Claim: {date_short} ({billed_str}) ✓")
+        elif suggested:
+            # Amount-tolerant ambiguity (Phase 12): one or more prior submitted
+            # bills exist for this date+practice. Render inline WITHOUT a
+            # correction number; the user resolves with "link" / "link N".
+            has_link_pending = True
+            if len(suggested) == 1:
+                prior = suggested[0]
+                prior_amt = _format_amount(prior.get("billed_amount"))
+                prior_date = _format_date_short(prior.get("service_date"))
+                link_lines.append(
+                    f"  ⚠️ No exact match for {date_short} ({billed_str}), but a "
+                    f"prior bill exists: billed {prior_amt} on {prior_date}. "
+                    f"Reply \"link\" to connect, or \"confirm\" to create a "
+                    f"separate claim."
+                )
+            else:
+                link_lines.append(
+                    f"  ⚠️ No exact match for {date_short} ({billed_str}). "
+                    f"Prior bills found:"
+                )
+                for n, prior in enumerate(suggested, start=1):
+                    prior_amt = _format_amount(prior.get("billed_amount"))
+                    prior_date = _format_date_short(prior.get("service_date"))
+                    link_lines.append(
+                        f"    link {n} — {prior_amt} (billed {prior_date})"
+                    )
+                link_lines.append(
+                    "  Reply \"link N\" to connect, or \"confirm\" to create a "
+                    "separate claim."
+                )
         else:
             action_index += 1
             action_lines.append(
@@ -141,8 +176,23 @@ def build_confirmation_message(
         lines.extend(action_lines)
         lines.append("")
 
-    if not action_lines:
+    if link_lines:
+        lines.append("Possible duplicate:")
+        lines.extend(link_lines)
+        lines.append("")
+
+    if not action_lines and not has_link_pending:
         lines.append("Reply \"confirm\" to save.")
+    elif has_link_pending and not action_lines:
+        lines.append(
+            "Reply \"confirm\" to save as-is, or \"link\" (or \"link N\") to "
+            "connect to a prior bill."
+        )
+    elif has_link_pending and action_lines:
+        lines.append(
+            "Reply \"confirm\" to save as-is, \"<number> <correction>\" to fix "
+            "a numbered item, or \"link\" (or \"link N\") to connect to a prior bill."
+        )
     else:
         lines.append(
             "Reply \"confirm\" to save as-is, or \"<number> <correction>\" "
@@ -161,6 +211,8 @@ def parse_confirmation_reply(
 
     Returns one of:
       {"action": "confirm"}
+      {"action": "cancel"}
+      {"action": "link", "choice": int}  # 0-based index into suggested_link
       {"action": "correction", "item_index": int, "correction_text": str}
       {"action": "free_text", "text": <reply_text>}
       {"action": "unknown"}
@@ -184,6 +236,18 @@ def parse_confirmation_reply(
         # Cancel phrases (checked BEFORE the numbered-correction regex)
         if lowered in _CANCEL_WORDS:
             return {"action": "cancel"}
+
+        # Link / link N (Phase 12): connect an ambiguous claim to a prior bill.
+        # "link" -> choice 0; "link 2" -> choice 1 (1-based input -> 0-based index).
+        # Checked BEFORE the numbered-correction regex so "link 2" is not parsed
+        # as a correction.
+        link_match = re.match(r"^link(?:\s+(\d+))?$", lowered)
+        if link_match:
+            num = link_match.group(1)
+            choice = (int(num) - 1) if num is not None else 0
+            if choice < 0:
+                choice = 0
+            return {"action": "link", "choice": choice}
 
         # Numbered correction: starts with a digit, optional dot/colon, then text
         match = re.match(r"^(\d+)\s*[.:)\-]?\s+(.*\S.*)$", normalized)
@@ -245,7 +309,10 @@ def apply_correction(pending: dict, action: dict) -> Optional[dict]:
             if not entry.get("matched"):
                 ordered.append(("practice", i))
         for j, entry in enumerate(claim_results):
-            if not entry.get("matched"):
+            # Skip link-pending claims: they are resolved via "link"/"link N",
+            # not numbered corrections, so they must not occupy a numbered slot
+            # (Phase 12).
+            if not entry.get("matched") and not entry.get("suggested_link"):
                 ordered.append(("claim", j))
         for k in range(len(extraction.providers)):
             ordered.append(("provider", k))

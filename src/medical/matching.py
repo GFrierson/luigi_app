@@ -25,7 +25,10 @@ from typing import Optional
 from rapidfuzz import process as rf_process
 
 from src.database import get_connection
-from src.medical.claims import find_by_match_key
+from src.medical.claims import (
+    find_by_match_key,
+    find_submitted_by_date_and_practice,
+)
 from src.medical.entities import resolve_practice, resolve_provider
 
 logger = logging.getLogger(__name__)
@@ -226,13 +229,44 @@ def match_claim(
     billed_amount: float,
 ) -> Optional[dict]:
     """
-    Look up an existing claim by the canonical match key.
+    Look up an existing claim by the canonical match key, with an amount-tolerant
+    ambiguity fallback (Phase 12).
 
-    Thin wrapper around find_by_match_key for symmetry with match_practice /
-    match_provider. Never raises.
+    Strategy:
+      1. find_by_match_key (exact service_date + practice_id + billed_amount).
+         A hit returns the claim dict unchanged (caller treats this as matched).
+      2. On miss, if practice_id is not None, look up prior *submitted* claims
+         for the same date+practice via find_submitted_by_date_and_practice.
+         - 0 results -> return None (unchanged behavior; caller creates new).
+         - 1+ results -> return an ambiguity dict:
+             {"matched": False, "suggested_link": [claim, ...],
+              "match_type": "prior_bill"}
+           The caller surfaces these as "link?" candidates rather than a match.
+
+    Never raises.
     """
     try:
-        return find_by_match_key(db_path, service_date, practice_id, billed_amount)
+        exact = find_by_match_key(db_path, service_date, practice_id, billed_amount)
+        if exact is not None:
+            return exact
+
+        if practice_id is None:
+            return None
+
+        prior = find_submitted_by_date_and_practice(db_path, service_date, practice_id)
+        if not prior:
+            return None
+
+        logger.info(
+            f"match_claim: no exact match but {len(prior)} prior submitted "
+            f"bill(s) found service_date={service_date} practice_id={practice_id} "
+            f"amount={billed_amount}"
+        )
+        return {
+            "matched": False,
+            "suggested_link": prior,
+            "match_type": "prior_bill",
+        }
     except Exception:
         logger.error(
             f"match_claim failed for service_date={service_date} "
@@ -276,24 +310,41 @@ def rematch_after_correction(db_path: str, pending: dict) -> dict:
             entry["practice_id"] = matched["id"] if matched else None
             practice_id_by_name[name] = matched["id"] if matched else None
 
-        # Map service_date -> billed_amount for claim re-matching.
-        billed_by_date = {c.service_date: c.billed_amount for c in extraction.claims}
-        practice_by_date = {c.service_date: c.practice_name for c in extraction.claims}
-
-        for entry in claim_results:
+        # Pair claim_results with extraction.claims by list index. Both lists are
+        # built in lockstep during ingestion, so index i corresponds to the same
+        # claim in both. Index pairing avoids the date-keyed dict collision that
+        # would drop one of two same-date claims with different amounts.
+        for i, entry in enumerate(claim_results):
             if entry.get("matched"):
                 continue
-            sd = entry.get("service_date", "")
-            pname = practice_by_date.get(sd)
+            if i >= len(extraction.claims):
+                continue
+            claim = extraction.claims[i]
+            pname = claim.practice_name
             pid = practice_id_by_name.get(pname)
             if pid is None:
                 entry["matched"] = False
                 entry["claim_id"] = None
+                entry.pop("suggested_link", None)
+                entry.pop("match_type", None)
                 continue
-            billed = billed_by_date.get(sd)
-            matched_claim = match_claim(db_path, sd, pid, billed)
-            entry["matched"] = matched_claim is not None
-            entry["claim_id"] = matched_claim["id"] if matched_claim else None
+            matched_claim = match_claim(db_path, claim.service_date, pid, claim.billed_amount)
+            if matched_claim is None:
+                entry["matched"] = False
+                entry["claim_id"] = None
+                entry.pop("suggested_link", None)
+                entry.pop("match_type", None)
+            elif matched_claim.get("suggested_link"):
+                # Amount-tolerant ambiguity: surface link candidates, stay unmatched.
+                entry["matched"] = False
+                entry["claim_id"] = None
+                entry["suggested_link"] = matched_claim["suggested_link"]
+                entry["match_type"] = matched_claim.get("match_type", "prior_bill")
+            else:
+                entry["matched"] = True
+                entry["claim_id"] = matched_claim["id"]
+                entry.pop("suggested_link", None)
+                entry.pop("match_type", None)
 
         # Providers: re-run match_provider (spec includes this); results are
         # informational only and not persisted into match_results.
