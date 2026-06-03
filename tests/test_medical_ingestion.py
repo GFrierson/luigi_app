@@ -1,10 +1,12 @@
 """Tests for src/medical/ingestion.py — commit_ingestion encounter stub behavior."""
 import sqlite3
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.database import init_db
 from src.medical.claims import create_claim, find_by_match_key
+from src.medical.confirmation import apply_correction, parse_confirmation_reply
 from src.medical.entities import (
     create_encounter,
     create_practice,
@@ -17,7 +19,11 @@ from src.medical.extraction import (
     ExtractionResult,
 )
 from src.medical.claims import adjudicate_claim
-from src.medical.ingestion import _pending_confirmations, commit_ingestion
+from src.medical.ingestion import (
+    _pending_confirmations,
+    commit_ingestion,
+    handle_correction,
+)
 from src.medical.scripts.seed_sep23_fixture import seed
 
 
@@ -295,3 +301,152 @@ def test_phase8_seed_fixture_no_orphan_claims(tmp_path):
     conn.close()
 
     assert orphan_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: correction loop
+# ---------------------------------------------------------------------------
+
+def _make_unmatched_practice_pending(
+    practice_name: str,
+    service_date: str = "2025-09-23",
+    billed_amount: float = 250.0,
+) -> dict:
+    """Pending where the practice (and its claim) are unmatched."""
+    claim = ExtractedClaim(
+        service_date=service_date,
+        billed_amount=billed_amount,
+        practice_name=practice_name,
+    )
+    extraction = ExtractionResult(
+        doc_type="eob",
+        practices=[ExtractedPractice(name=practice_name)],
+        providers=[],
+        claims=[claim],
+        adjudications=[],
+    )
+    return {
+        "extraction": extraction,
+        "match_results": {
+            "practices": [
+                {"name": practice_name, "matched": False, "practice_id": None},
+            ],
+            "claims": [
+                {"service_date": service_date, "matched": False, "claim_id": None},
+            ],
+        },
+        "document_id": None,
+        "practice_id_by_name": {practice_name: None},
+    }
+
+
+@pytest.mark.asyncio
+async def test_handle_correction_rerenders_with_updated_practice_name(db_path):
+    practice = create_practice(db_path, "Acme Clinic")
+    chat_id = 12345
+    pending = _make_unmatched_practice_pending("Acme Clini")
+
+    context = MagicMock()
+    context.bot.send_message = AsyncMock()
+
+    await handle_correction(
+        db_path,
+        chat_id,
+        pending,
+        {"action": "correction", "item_index": 1, "correction_text": "Acme Clinic"},
+        context,
+    )
+
+    stored = _pending_confirmations[chat_id]
+    assert stored["correction_rounds"] == 1
+    practice_entry = stored["match_results"]["practices"][0]
+    assert practice_entry["matched"] is True
+    assert practice_entry["practice_id"] == practice["id"]
+    context.bot.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_correction_service_date_finds_existing_claim(db_path):
+    practice = create_practice(db_path, "Acme Clinic")
+    claim = create_claim(db_path, "2025-09-23", practice["id"], 250.0)
+    chat_id = 12345
+
+    extracted_claim = ExtractedClaim(
+        service_date="2025-09-22",  # wrong date
+        billed_amount=250.0,
+        practice_name="Acme Clinic",
+    )
+    extraction = ExtractionResult(
+        doc_type="eob",
+        practices=[ExtractedPractice(name="Acme Clinic")],
+        providers=[],
+        claims=[extracted_claim],
+        adjudications=[],
+    )
+    pending = {
+        "extraction": extraction,
+        "match_results": {
+            "practices": [
+                {"name": "Acme Clinic", "matched": True, "practice_id": practice["id"]},
+            ],
+            "claims": [
+                {"service_date": "2025-09-22", "matched": False, "claim_id": None},
+            ],
+        },
+        "document_id": None,
+        "practice_id_by_name": {"Acme Clinic": practice["id"]},
+    }
+
+    context = MagicMock()
+    context.bot.send_message = AsyncMock()
+
+    await handle_correction(
+        db_path,
+        chat_id,
+        pending,
+        {"action": "correction", "item_index": 1, "correction_text": "2025-09-23"},
+        context,
+    )
+
+    claim_entry = _pending_confirmations[chat_id]["match_results"]["claims"][0]
+    assert claim_entry["matched"] is True
+    assert claim_entry["claim_id"] == claim["id"]
+
+
+def test_parse_confirmation_reply_cancel_discards_pending():
+    chat_id = 99999
+    _pending_confirmations[chat_id] = {"dummy": True}
+
+    result = parse_confirmation_reply("cancel", [])
+    assert result["action"] == "cancel"
+
+    # Handler's cancel branch: pop the pending state.
+    _pending_confirmations.pop(chat_id, None)
+    assert chat_id not in _pending_confirmations
+
+
+@pytest.mark.asyncio
+async def test_handle_correction_caps_at_three_rounds(db_path):
+    practice = create_practice(db_path, "Acme Clinic")
+    chat_id = 12345
+    pending = _make_unmatched_practice_pending("Acme Clini")
+    pending["correction_rounds"] = 3  # next increment -> 4, exceeds cap of 3
+    _pending_confirmations[chat_id] = pending
+
+    context = MagicMock()
+    context.bot.send_message = AsyncMock()
+
+    await handle_correction(
+        db_path,
+        chat_id,
+        pending,
+        {"action": "correction", "item_index": 1, "correction_text": "Acme Clinic"},
+        context,
+    )
+
+    context.bot.send_message.assert_awaited_once()
+    sent_text = context.bot.send_message.await_args.kwargs["text"]
+    assert "3 corrections" in sent_text
+
+    # Pending must not advance to a fresh re-rendered round.
+    assert _pending_confirmations[chat_id]["correction_rounds"] == 3  # unchanged

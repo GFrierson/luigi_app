@@ -22,6 +22,7 @@ from src.medical.ingestion import (
     ingest_document,
     handle_photo_group,
     commit_ingestion,
+    handle_correction,
     _pending_confirmations,
 )
 from src.medical.confirmation import parse_confirmation_reply
@@ -620,16 +621,20 @@ async def _on_message(update: Update, context) -> None:
             return
         elif action == "correction":
             try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        f"Got it. What specifically should be corrected for "
-                        f"item {result['item_index']}?"
-                    ),
-                )
+                await handle_correction(db_path, chat_id, pending, result, context)
             except Exception:
                 logger.error(
-                    f"_on_message: failed to send correction prompt to chat {chat_id}",
+                    f"_on_message: handle_correction failed for chat {chat_id}",
+                    exc_info=True,
+                )
+            return
+        elif action == "cancel":
+            _pending_confirmations.pop(chat_id, None)
+            try:
+                await context.bot.send_message(chat_id=chat_id, text="Cancelled.")
+            except Exception:
+                logger.error(
+                    f"_on_message: failed to send 'Cancelled.' to chat {chat_id}",
                     exc_info=True,
                 )
             return

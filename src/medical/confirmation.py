@@ -10,6 +10,7 @@ Two public functions:
     - parse_confirmation_reply(reply_text, pending_items) -> dict
 """
 
+import copy
 import logging
 import re
 from typing import Optional
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 _CONFIRM_WORDS = {"yes", "y", "confirm", "ok", "okay", "looks good", "good"}
+_CANCEL_WORDS = {"cancel", "discard", "nevermind", "never mind"}
 
 
 def _format_amount(amount: Optional[float]) -> str:
@@ -179,6 +181,10 @@ def parse_confirmation_reply(
         if lowered in _CONFIRM_WORDS:
             return {"action": "confirm"}
 
+        # Cancel phrases (checked BEFORE the numbered-correction regex)
+        if lowered in _CANCEL_WORDS:
+            return {"action": "cancel"}
+
         # Numbered correction: starts with a digit, optional dot/colon, then text
         match = re.match(r"^(\d+)\s*[.:)\-]?\s+(.*\S.*)$", normalized)
         if match:
@@ -197,3 +203,98 @@ def parse_confirmation_reply(
             exc_info=True,
         )
         return {"action": "unknown"}
+
+
+def apply_correction(pending: dict, action: dict) -> Optional[dict]:
+    """
+    Apply a single numbered correction to a deep copy of `pending`.
+
+    The numbered item space mirrors the "Action required" list in
+    build_confirmation_message, built in this exact order:
+        1. practices where not entry["matched"]
+        2. claims where not entry["matched"]
+        3. all providers from extraction.providers
+
+    `action` shape: {"item_index": int (1-based), "correction_text": str}
+
+    Behavior:
+      - Returns None (without mutating the caller's dict) if item_index is out
+        of range — the caller surfaces a user-facing "no such item" message.
+      - For a practice name correction: updates the practice entry's name,
+        re-keys practice_id_by_name (old name dropped, new name -> None), and
+        rewrites every extraction.claims[*].practice_name that referenced the
+        old name.
+      - For a claim service_date correction: updates the claim match entry's
+        service_date and the corresponding extraction.claims[j].service_date.
+      - For a provider correction: updates extraction.providers[k].name.
+      - On any unexpected error: logs with exc_info=True and returns the
+        ORIGINAL pending unchanged (not None).
+    """
+    try:
+        updated = copy.deepcopy(pending)
+        extraction: ExtractionResult = updated["extraction"]
+        match_results: dict = updated["match_results"]
+        practice_id_by_name: dict = updated.setdefault("practice_id_by_name", {})
+
+        practice_results = match_results.get("practices", []) or []
+        claim_results = match_results.get("claims", []) or []
+
+        # Build the same (kind, list_index) ordering used for numbering.
+        ordered: list[tuple[str, int]] = []
+        for i, entry in enumerate(practice_results):
+            if not entry.get("matched"):
+                ordered.append(("practice", i))
+        for j, entry in enumerate(claim_results):
+            if not entry.get("matched"):
+                ordered.append(("claim", j))
+        for k in range(len(extraction.providers)):
+            ordered.append(("provider", k))
+
+        item_index = action.get("item_index")
+        if not isinstance(item_index, int) or item_index < 1 or item_index > len(ordered):
+            logger.error(
+                f"apply_correction: item_index={item_index!r} out of range "
+                f"(1..{len(ordered)})",
+                exc_info=True,
+            )
+            return None
+
+        correction_text = (action.get("correction_text") or "").strip()
+        kind, list_idx = ordered[item_index - 1]
+
+        if kind == "practice":
+            entry = practice_results[list_idx]
+            old_name = entry.get("name", "")
+            new_name = correction_text
+            entry["name"] = new_name
+            # Mark as needing re-match.
+            entry["matched"] = False
+            entry["practice_id"] = None
+            # Re-key practice_id_by_name.
+            practice_id_by_name.pop(old_name, None)
+            practice_id_by_name[new_name] = None
+            # Rewrite every claim that referenced the old practice name.
+            for claim in extraction.claims:
+                if claim.practice_name == old_name:
+                    claim.practice_name = new_name
+
+        elif kind == "claim":
+            entry = claim_results[list_idx]
+            new_date = correction_text
+            entry["service_date"] = new_date
+            entry["matched"] = False
+            entry["claim_id"] = None
+            if 0 <= list_idx < len(extraction.claims):
+                extraction.claims[list_idx].service_date = new_date
+
+        elif kind == "provider":
+            extraction.providers[list_idx].name = correction_text
+
+        return updated
+
+    except Exception:
+        logger.error(
+            f"apply_correction: unexpected failure for action={action!r}",
+            exc_info=True,
+        )
+        return pending

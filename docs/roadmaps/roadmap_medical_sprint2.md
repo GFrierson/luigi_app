@@ -68,11 +68,37 @@ Scanned PDFs (no selectable text layer) are now rasterized via `pdf2image` and s
 ## Phase 10: Correction Loop
 **What's true when this is done:** When a confirmation message shows an unrecognized practice or wrong date and the user replies with a numbered correction (e.g. `1: Manhattan Pain Med`), Luigi re-renders the confirmation with the correction applied. The user then replies `confirm` to commit. Corrections round-trip correctly for practice name, provider name, and service date. After 3 correction rounds without a `confirm`, Luigi prompts to confirm or cancel to prevent unbounded loops.
 
-- [ ] In `src/medical/confirmation.py`: add `apply_correction(pending: dict, action: dict) -> dict` — pure function that updates `pending["match_results"]` (and `pending["practice_id_by_name"]` for name corrections) based on a parsed correction action; returns an updated copy of `pending`
-- [ ] In `src/medical/matching.py`: add `rematch_after_correction(db_path: str, pending: dict) -> dict` — re-runs `match_practice` / `match_provider` / `match_claim` only on fields that were corrected; returns updated `match_results`
-- [ ] In `src/medical/ingestion.py`: on `correction` reply action from `parse_confirmation_reply`, call `apply_correction` → `rematch_after_correction` → `build_confirmation_message`; store updated pending and re-send the confirmation message; track correction round count in the pending dict
-- [ ] Cap correction rounds at 3; on the 4th correction attempt, send: _"I've applied 3 corrections. Reply `confirm` to save or `cancel` to discard."_ — do not re-render
-- [ ] Write tests: correction re-renders confirmation with updated practice name; correction on service date updates claim match lookup; `cancel` reply after correction discards pending and sends cancellation message; 3-round cap sends final prompt instead of re-rendering
+- [x] In `src/medical/confirmation.py`: add `apply_correction(pending: dict, action: dict) -> dict` — pure function that updates `pending["match_results"]` (and `pending["practice_id_by_name"]` for name corrections) based on a parsed correction action; returns an updated copy of `pending`
+- [x] In `src/medical/matching.py`: add `rematch_after_correction(db_path: str, pending: dict) -> dict` — re-runs `match_practice` / `match_provider` / `match_claim` only on fields that were corrected; returns updated `match_results`
+- [x] In `src/medical/ingestion.py`: on `correction` reply action from `parse_confirmation_reply`, call `apply_correction` → `rematch_after_correction` → `build_confirmation_message`; store updated pending and re-send the confirmation message; track correction round count in the pending dict
+- [x] Cap correction rounds at 3; on the 4th correction attempt, send: _"I've applied 3 corrections. Reply `confirm` to save or `cancel` to discard."_ — do not re-render
+- [x] Write tests: correction re-renders confirmation with updated practice name; correction on service date updates claim match lookup; `cancel` reply after correction discards pending and sends cancellation message; 3-round cap sends final prompt instead of re-rendering
+
+### Handoff — Phase 10
+**Completed:** 2026-06-03
+**Branch:** main
+**Tests:** pytest tests/ -x -q → 223 passed
+
+#### What was built
+Users can now correct numbered items in a confirmation message by replying `<number> <correction>`. Each correction re-matches the affected entity against the DB and re-sends an updated confirmation. Corrections are capped at 3; the 4th attempt gets a final prompt instead of a re-render. A `cancel`/`discard` reply discards the pending confirmation and clears state. The round count lives in memory only — no schema change required.
+
+#### Files changed
+- `src/medical/confirmation.py` — added `_CANCEL_WORDS` constant and `cancel` branch in `parse_confirmation_reply`; added `apply_correction(pending, action) -> Optional[dict]` that deep-copies pending, maps 1-based item_index to the filtered action-required list (unmatched practices → unmatched claims → providers), patches the field, syncs `practice_id_by_name` and `extraction.claims[*].practice_name` on practice-name corrections, returns `None` on out-of-range index
+- `src/medical/matching.py` — added `rematch_after_correction(db_path, pending) -> dict` that re-runs `match_practice` on unresolved practices, `match_claim` on unmatched claims, and `match_provider` on all providers; returns updated `match_results`
+- `src/medical/ingestion.py` — added `_MAX_CORRECTION_ROUNDS = 3` and async `handle_correction(db_path, chat_id, pending, action, context)`: increments round count, enforces cap with `> _MAX_CORRECTION_ROUNDS` (fires on 4th attempt so exactly 3 corrections are re-rendered), sends user-facing error on invalid item index, re-matches via `asyncio.to_thread`, stores updated pending, sends new confirmation
+- `src/telegram_handler.py` — replaced stub `correction` branch with call to `handle_correction`; added `cancel` branch that pops `_pending_confirmations[chat_id]` and sends "Cancelled."
+- `tests/test_medical_ingestion.py` — 4 new tests: practice-name correction re-renders and finds matched practice (rounds → 1), service-date correction finds existing claim, cancel reply clears pending, 3-round cap (starts at correction_rounds=3, 4th attempt fires cap without advancing stored state)
+
+#### How to verify manually
+1. Send an EOB that has an unrecognized practice — confirm the numbered prompt appears
+2. Reply `1 Correct Practice Name` — confirm the confirmation re-renders with the corrected name and DB-matched practice
+3. Reply `1 correct date` targeting a claim date — confirm the claim match updates
+4. Reply `cancel` — confirm "Cancelled." is sent and no pending state remains
+5. Make 3 corrections in sequence — confirm each re-renders; the 4th attempt returns the "I've applied 3 corrections" prompt instead of re-rendering
+
+#### Open questions / deferred decisions
+- **Provider corrections:** providers are re-matched in `rematch_after_correction` but the result is informational only (providers aren't surfaced in `match_results`). If per-provider match state in the confirmation becomes useful, `match_results` would need a `providers` sub-dict.
+- **`practice_id_by_name` after correction to a new (unrecognized) name:** `rematch_after_correction` calls `match_practice` which returns `None` for unknown names, leaving `practice_id = None`. This means `commit_ingestion` will create a new practice for the corrected name — which is correct behavior; no change needed.
 
 ---
 

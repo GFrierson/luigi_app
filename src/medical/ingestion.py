@@ -27,7 +27,7 @@ import logging
 from typing import Optional
 
 from src.medical.claims import adjudicate_claim, create_claim
-from src.medical.confirmation import build_confirmation_message
+from src.medical.confirmation import apply_correction, build_confirmation_message
 from src.medical.documents import attach_document, save_document
 from src.medical.entities import (
     add_practice_alias,
@@ -43,7 +43,14 @@ from src.medical.extraction import (
     ExtractionResult,
     extract_from_file,
 )
-from src.medical.matching import match_claim, match_practice, match_provider
+from src.medical.matching import (
+    match_claim,
+    match_practice,
+    match_provider,
+    rematch_after_correction,
+)
+
+_MAX_CORRECTION_ROUNDS = 3
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +245,94 @@ async def _expire_confirmation(context) -> None:
                 )
     except Exception:
         logger.error("_expire_confirmation: unexpected failure", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Correction loop
+# ---------------------------------------------------------------------------
+
+async def handle_correction(
+    db_path: str,
+    chat_id: int,
+    pending: dict,
+    action: dict,
+    context,
+) -> None:
+    """
+    Apply a numbered correction to a pending confirmation, re-match the affected
+    entities against the DB, and re-send an updated confirmation message.
+
+    Round cap: after _MAX_CORRECTION_ROUNDS corrections, stop accepting more and
+    prompt the user to confirm or cancel. The round count lives in the in-memory
+    pending dict (`correction_rounds`); it is not persisted.
+
+    Never raises.
+    """
+    try:
+        # Increment round count first, then enforce the cap.
+        rounds = pending.get("correction_rounds", 0) + 1
+        if rounds > _MAX_CORRECTION_ROUNDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "I've applied 3 corrections. Reply confirm to save or "
+                        "cancel to discard."
+                    ),
+                )
+            except Exception:
+                logger.error(
+                    f"handle_correction: failed to send round-cap notice to "
+                    f"chat {chat_id}",
+                    exc_info=True,
+                )
+            return
+
+        updated = apply_correction(pending, action)
+        if updated is None:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"I don't see item {action.get('item_index', '?')}. "
+                        f"Reply with a valid number."
+                    ),
+                )
+            except Exception:
+                logger.error(
+                    f"handle_correction: failed to send invalid-item notice to "
+                    f"chat {chat_id}",
+                    exc_info=True,
+                )
+            return
+
+        # apply_correction deep-copies pending, so carry the round count forward.
+        updated["correction_rounds"] = rounds
+
+        new_match_results = await asyncio.to_thread(
+            rematch_after_correction, db_path, updated
+        )
+        updated["match_results"] = new_match_results
+
+        message = build_confirmation_message(
+            updated["extraction"], updated["match_results"]
+        )
+
+        _pending_confirmations[chat_id] = updated
+
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=message)
+        except Exception:
+            logger.error(
+                f"handle_correction: failed to send updated confirmation to "
+                f"chat {chat_id}",
+                exc_info=True,
+            )
+    except Exception:
+        logger.error(
+            f"handle_correction: unexpected failure for chat {chat_id}",
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------

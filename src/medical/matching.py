@@ -240,3 +240,67 @@ def match_claim(
             exc_info=True,
         )
         return None
+
+
+def rematch_after_correction(db_path: str, pending: dict) -> dict:
+    """
+    Re-run entity matching after a correction has been applied to `pending`.
+
+    Operates on the already-corrected pending state (see apply_correction):
+      - For each practice entry with practice_id is None: re-run match_practice
+        and update the entry's matched/practice_id plus practice_id_by_name.
+      - For each unmatched claim entry: re-run match_claim using the practice_id
+        resolved for that claim's practice_name (None practice_id -> stays
+        unmatched).
+      - For every provider in extraction.providers: re-run match_provider
+        (informational; providers are not stored in match_results).
+
+    Returns the updated match_results. On any error, logs with exc_info=True and
+    returns match_results unchanged.
+    """
+    match_results = pending.get("match_results", {}) or {}
+    try:
+        extraction = pending["extraction"]
+        practice_id_by_name: dict = pending.setdefault("practice_id_by_name", {})
+
+        practice_results = match_results.get("practices", []) or []
+        claim_results = match_results.get("claims", []) or []
+
+        # Re-match practices that have no resolved id yet.
+        for entry in practice_results:
+            if entry.get("practice_id") is not None:
+                continue
+            name = entry.get("name", "")
+            matched = match_practice(db_path, name)
+            entry["matched"] = matched is not None
+            entry["practice_id"] = matched["id"] if matched else None
+            practice_id_by_name[name] = matched["id"] if matched else None
+
+        # Map service_date -> billed_amount for claim re-matching.
+        billed_by_date = {c.service_date: c.billed_amount for c in extraction.claims}
+        practice_by_date = {c.service_date: c.practice_name for c in extraction.claims}
+
+        for entry in claim_results:
+            if entry.get("matched"):
+                continue
+            sd = entry.get("service_date", "")
+            pname = practice_by_date.get(sd)
+            pid = practice_id_by_name.get(pname)
+            if pid is None:
+                entry["matched"] = False
+                entry["claim_id"] = None
+                continue
+            billed = billed_by_date.get(sd)
+            matched_claim = match_claim(db_path, sd, pid, billed)
+            entry["matched"] = matched_claim is not None
+            entry["claim_id"] = matched_claim["id"] if matched_claim else None
+
+        # Providers: re-run match_provider (spec includes this); results are
+        # informational only and not persisted into match_results.
+        for prov in extraction.providers:
+            match_provider(db_path, prov.name)
+
+        return match_results
+    except Exception:
+        logger.error("rematch_after_correction failed", exc_info=True)
+        return match_results
