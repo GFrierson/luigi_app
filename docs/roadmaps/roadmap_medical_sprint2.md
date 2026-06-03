@@ -1,9 +1,31 @@
 # Roadmap: Medical Bill Tracking — Sprint 2
-**Goal:** Close the three v1 deferred gaps from Sprint 1 (scanned PDF rendering, multi-photo combining, correction loop), add document intelligence that learns EOB/statement page structure so extraction focuses only on content-bearing pages, and fix claim matching so billed-amount mismatches between bills and EOBs surface as an explicit user prompt rather than silently creating duplicate claims.
+**Goal:** Close the three v1 deferred gaps from Sprint 1 (scanned PDF rendering, multi-photo combining, correction loop), add document intelligence that learns EOB/statement page structure so extraction focuses only on content-bearing pages, fix claim matching so billed-amount mismatches surface as an explicit user prompt rather than silently creating duplicate claims, and introduce a playbook-driven deterministic extractor layer — starting with Anthem EOBs and EOB check PDFs — that routes known-issuer documents away from the LLM.
 **Depends on:** Sprint 1 complete (Phases 1–8 of `roadmap_medical_bill_tracking.md`)
-**Estimated scope:** 2–3 weeks
+**Estimated scope:** 3–4 weeks
 **Status:** Not started
-**Last updated:** 2026-05-07
+**Last updated:** 2026-06-03
+
+---
+
+## Extractor Playbook
+
+Every Phase 13+ extractor follows this sequence. The pattern is adapted from the dobby PDF extraction platform (`dobby_docs/roadmaps/roadmap-pdf-extraction-v2.md`), where it took initial multi-extractor precision from 6.9% to ≥ 95–100% across all gated doc types by working one issuer × doc-type at a time.
+
+1. **Collect sample** — gather N ≥ 10 real PDFs of the target `(insurer, doc_type)`. Save to `experiments/medical/{insurer}_{doc_type}/sample/`. Aim for N ≥ 15 for multi-field extractors. Note distinct layout variants (single-page vs. multi-page, electronic vs. paper-scan).
+2. **Annotate ground truth** — for each doc, manually fill true values for each target field. Commit as `experiments/medical/{insurer}_{doc_type}/annotations.csv`. Only mark a row `_review_status=verified` after personal inspection of the PDF.
+3. **Build annotation + eval scripts before the extractor** — `src/medical/scripts/annotate_{insurer}_{doc_type}.py` runs the pypdf text layer against the sample and pre-fills `_hyp_*` hypothesis columns to reduce manual annotation work; `src/medical/scripts/eval_{insurer}_{doc_type}.py` reads verified rows, runs the extractor, and prints precision / recall / N per field vs. the gate. The review-and-improve loop only works if you can measure the effect of each change in under a minute.
+4. **Build the extractor** — `src/medical/extractors/{insurer}_{doc_type}.py` with a module-level `EXTRACTOR_VERSION = "{insurer}_{doc_type}_v1"` constant. Export a top-level `extract(text: str) -> Optional[ExtractionResult]` function. Never raise — return `None` on failure, log with `exc_info=True`.
+5. **Review-and-improve loop** — for each iteration:
+   1. Run `eval_{insurer}_{doc_type}.py`. Identify failing rows.
+   2. Group failures by root cause: wrong label matched? date format variant? multi-claim table? header vs. line-item confusion? Name the failure mode.
+   3. Fix the highest-impact failure mode, add a unit test that pins the case.
+   4. Re-run the eval. Also run `run_all_extractor_evals.py` to confirm no regressions on previously-gated extractors.
+   5. **Improved and gate cleared** → stop, move to step 6. **Improved but gate not cleared** → loop. **No improvement** → check in with a note explaining why before continuing.
+6. **Gate** — precision ≥ 90%, N ≥ 10 docs for single-field extractors; N ≥ 15 for multi-field. A field with zero annotated rows is `UNSCORED` (skip, not failure).
+7. **Register in allowlist** — add entry to `EXTRACTOR_ALLOWLIST` in `src/medical/extractors/allowlist.py`; confirm `extract_from_file()` in `extraction.py` routes the new `(insurer, doc_type)` combination to the extractor before the LLM fallback. Run `run_all_extractor_evals.py` (exit 0) as the gate record.
+8. **Update shared runner** — add the new extractor's `run_eval()` function to `src/medical/scripts/run_all_extractor_evals.py` so regressions are caught automatically.
+
+**The canonical example:** dobby Phase 4C (ONE invoice MBL) — initial eval 96.2% precision (above gate, but 3 known misses) → root cause identified (carrier SCAC prefix `ONEY` decorating extracted BL numbers) → normalizer shipped with 5 unit tests → re-run ~99% precision.
 
 ---
 
@@ -68,9 +90,77 @@
 
 ---
 
+## Phase 13: Extractor Infrastructure — Dispatch Router + Annotation Harness
+**What's true when this is done:** A new `src/medical/extractors/` package exists with an allowlist-based dispatch layer. `extract_from_file()` checks `(insurer, doc_type)` against the allowlist and routes to a registered deterministic extractor before falling back to the LLM — so existing behavior is completely unchanged until a Phase 14/15 extractor clears its gate. A shared eval runner script exists that runs all gated extractors, confirms no regressions, and exits non-zero if any fail. The `experiments/medical/` directory tree and annotation CSV conventions are documented. This phase ships zero extractor logic — only the infrastructure that Phases 14 and 15 build on.
+
+- [ ] Create `src/medical/extractors/__init__.py` (empty package marker)
+- [ ] Create `src/medical/extractors/allowlist.py`:
+  ```python
+  # Each entry: { "insurer": str, "doc_type": str, "extractor_version": str }
+  EXTRACTOR_ALLOWLIST: list[dict] = []
+  ```
+  Start empty; each new extractor appends its entry here after clearing its gate.
+- [ ] Add `_detect_insurer(text: str) -> Optional[str]` helper to `src/medical/extraction.py` — scans lowercased first-page text for insurer-identifying phrases before dispatching. Initial entries: `"anthem"` / `"blue cross blue shield of georgia"` / `"bcbs"` → `"anthm"`. Returns `None` if no match. Extend the mapping as new extractors are added.
+- [ ] Refactor `extract_from_file()` in `src/medical/extraction.py` to call `_detect_insurer(text)` after the pypdf text pass, then check `EXTRACTOR_ALLOWLIST` for a matching `(insurer, doc_type)` entry. If found, import and call that extractor's `extract(text)` and return the result; if not found (or if the deterministic extractor returns `None`), fall through to the existing LLM call unchanged.
+- [ ] Add `"check"` to the `doc_type` literal in `ExtractionResult` and `EOB_PROMPT` so Anthem check PDFs can be classified as a distinct doc type from `"eob"`.
+- [ ] Create `src/medical/scripts/run_all_extractor_evals.py` — shared runner: imports `run_eval()` from each registered extractor's eval script, runs them in sequence, prints a summary table (extractor × field: N, precision %, PASS / FAIL / SKIP), exits 1 if any FAIL. Initially no registered evals; add one line per eval script as Phases 14/15 complete.
+- [ ] Create directory skeleton: `experiments/medical/` with a `README.md` describing the annotation CSV format (`file_path`, `_true_{field}`, `_hyp_{field}`, `_review_status`). **Do not commit the sample PDFs** — commit only the annotation CSVs (field values only, no raw document content).
+- [ ] Write tests: `_detect_insurer` returns `"anthm"` on Anthem text, `None` on unrecognized text; dispatch routes to a registered extractor (stub); unregistered `(insurer, doc_type)` falls through to LLM unchanged; `run_all_extractor_evals.py` exits 0 with no registered evals.
+
+---
+
+## Phase 14: Anthem EOB Parser
+**What's true when this is done:** Anthem EOB PDFs (text-layer) produce an `ExtractionResult` deterministically without an LLM call, at ≥ 90% precision on N ≥ 15 annotated docs (multi-field extractor). The extractor is registered in the allowlist, dispatched from `extract_from_file()`, and covered by the shared eval runner.
+
+**Blocked by:** Phase 13 complete. Can start in parallel with Phases 9–12 — no dependency on scanned PDF rendering or claim-matching work.
+
+**Playbook steps (follow Extractor Playbook above):**
+
+- [ ] **Sample** — collect N ≥ 15 Anthem EOB PDFs. Save to `experiments/medical/anthm_eob/sample/`. Note layout variants: single-claim vs. multi-claim, electronic delivery vs. paper-scan, standard EOB vs. coordination-of-benefits EOB.
+- [ ] **Annotate** — manually fill true values for each doc. Target fields: `service_date`, `practice_name`, `provider_name`, `billed_amount`, `allowed_amount`, `plan_paid`, `member_responsibility`, `claim_number`, `procedure_codes` (list), `diagnosis_codes` (list). Commit as `experiments/medical/anthm_eob/annotations.csv` with `_review_status=verified` per row.
+- [ ] **Annotation script** — `src/medical/scripts/annotate_anthm_eob.py`: reads PDFs in sample directory, extracts text via pypdf, pre-fills `_hyp_*` columns using heuristic label searches (e.g., `"Claim Number"`, `"Billed Amount"`, `"Plan Paid"`), writes `annotations.csv` with `_true_*` columns blank for manual fill. Prints a summary of which fields had hypothesis hits vs. misses.
+- [ ] **Eval script** — `src/medical/scripts/eval_anthm_eob.py`: reads verified rows from `annotations.csv`, calls `extract(text)` from `anthm_eob.py`, compares each field, prints precision / recall / N per field, PASS / FAIL vs. gate (≥ 90%, N ≥ 15). Export `run_eval(sample_dir: str, annotations_path: str) -> dict` for use by the shared runner.
+- [ ] **Build extractor** — `src/medical/extractors/anthm_eob.py`:
+  - `EXTRACTOR_VERSION = "anthm_eob_v1"` at module level
+  - `extract(text: str) -> Optional[ExtractionResult]` — label-based text extraction; never raises
+  - Label targets (tune from real docs): `"Service Date"` / `"Date of Service"`, `"Billed"` / `"Billed Amount"`, `"Allowed"`, `"Plan Paid"`, `"Your Responsibility"` / `"Member Responsibility"`, `"Claim Number"` / `"Claim #"`, provider block (look for `"Provider:"` or rendering provider header), procedure code block (`CPT:` or table column)
+  - Return `None` and `logger.error(..., exc_info=True)` on any parse failure; caller falls through to LLM
+- [ ] **Review-and-improve loop** — typical failure modes to watch for: multi-claim EOBs with one row per claim (need to iterate claim rows, not just find first label); `"Plan Paid"` vs. `"Check Amount"` label drift across EOB versions; date format variants (`MM/DD/YYYY` vs. `MMM DD, YYYY`); procedure codes in a table vs. inline. Fix by root cause, add a pinning unit test per fix, re-run eval.
+- [ ] **Gate** — precision ≥ 90%, N ≥ 15. Run `run_all_extractor_evals.py` (exit 0) as the gate record.
+- [ ] **Register** — add `{ "insurer": "anthm", "doc_type": "eob", "extractor_version": "anthm_eob_v1" }` to `EXTRACTOR_ALLOWLIST`; add `run_eval` import to `run_all_extractor_evals.py`.
+- [ ] **Tests** — `tests/test_medical_extractors.py`: happy path extracts correct `service_date`, `billed_amount`, `plan_paid` from a minimal fixture string; multi-claim EOB iterates all claim rows; `claim_number` not found returns `None` (not a crash); gate score committed as a comment in the test file header.
+
+---
+
+## Phase 15: Anthem EOB Check PDF Parser
+**What's true when this is done:** Anthem check PDFs (Explanation of Payment / remittance advice PDFs sent with physical checks to the member) produce an `ExtractionResult` with `doc_type="check"` deterministically, at ≥ 90% precision on N ≥ 10 annotated docs. Registered in the allowlist, dispatched, and covered by the shared runner. Running `run_all_extractor_evals.py` confirms both the Anthem EOB extractor (Phase 14) and this extractor pass with no regressions.
+
+**Blocked by:** Phase 13 complete. Phase 14 recommended first — shares evaluation infrastructure and teaches Anthem label conventions; check PDFs often reference EOB claim numbers.
+
+**Playbook steps:**
+
+- [ ] **Sample** — collect N ≥ 10 Anthem check / remittance PDFs. Save to `experiments/medical/anthm_check/sample/`. Determine whether these are electronic PDFs or paper-scan (informs whether scanned-PDF handling from Phase 9 is a prerequisite).
+- [ ] **Annotate** — target fields: `check_number`, `check_date`, `payee_name`, `check_amount`, `claim_references` (list of claim numbers paid by this check). Commit as `experiments/medical/anthm_check/annotations.csv`.
+- [ ] **Annotation script** — `src/medical/scripts/annotate_anthm_check.py`: same structure as Phase 14's annotation script. Pre-fill `_hyp_*` columns from label scans (`"Check Number"`, `"Check Date"`, `"Pay To"`, `"Total Amount"`, `"Claim Number"`).
+- [ ] **Eval script** — `src/medical/scripts/eval_anthm_check.py`: same structure. Export `run_eval()` for the shared runner.
+- [ ] **Build extractor** — `src/medical/extractors/anthm_check.py`:
+  - `EXTRACTOR_VERSION = "anthm_check_v1"`
+  - `extract(text: str) -> Optional[ExtractionResult]` with `doc_type="check"`
+  - Label targets (tune from real docs): `"Check Number"`, `"Check Date"`, `"Pay To"` / `"Payable To"`, `"Total Amount"` / `"Amount"`, claim number table or reference block
+  - Handle remittance tables: a single check may reference multiple claim numbers — collect all into `claim_references` list
+- [ ] **Review-and-improve loop** — typical failure modes: check amount vs. per-claim amount confusion; claim references in a table (multi-row extraction); check number format variety. Same pattern as Phase 14.
+- [ ] **Gate** — precision ≥ 90%, N ≥ 10. Run `run_all_extractor_evals.py` (exit 0 for both this extractor AND Phase 14 — no regressions).
+- [ ] **Register** — add `{ "insurer": "anthm", "doc_type": "check", "extractor_version": "anthm_check_v1" }` to `EXTRACTOR_ALLOWLIST`; add `run_eval` import to `run_all_extractor_evals.py`.
+- [ ] **Tests** — `tests/test_medical_extractors.py`: extend with check fixture tests; multi-claim check iterates all claim reference rows; `check_amount` parses correctly for both `$1,234.56` and `1234.56` formats.
+
+---
+
 ## Blockers & Open Questions
 
 - [ ] **Poppler system dependency** — `pdf2image` requires Poppler binaries installed at the OS level. This needs to be documented in the project README and added to any deployment scripts or Dockerfiles. The VPS deployment process must be updated before Phase 9 ships.
 - [ ] **Template keying by insurer vs. practice** — the `document_templates` schema keys templates on `(doc_type, practice_id)`. EOBs from the same insurer but different practices may have identical layouts. If this proves true in practice, add an `insurer_id` key column and a fallback lookup chain: `(doc_type, practice_id)` → `(doc_type, insurer_id)` → `(doc_type, NULL)`. Deferred until second insurer enters the picture.
 - [ ] **Multi-image vision token cost** — combining N album photos into one vision call increases per-call token usage. For 3-page photo albums this is acceptable; for large albums (>6 images) it may exceed model context or become expensive. Add a `MAX_ALBUM_IMAGES` guard (suggest 6) with a user-facing message if exceeded.
 - [ ] **Correction loop and `practice_id_by_name` consistency** — `apply_correction` must keep `practice_id_by_name` in sync when a practice name correction resolves to an existing DB row vs. a new entity. The `rematch_after_correction` step must re-run `match_practice` against the DB so the corrected name gets a real `practice_id` before `confirm` is processed.
+- [ ] **Anthem check PDFs may be scanned** — if the physical check + remittance is scanned and sent as a PDF, Phase 9 (scanned PDF rendering via pdf2image) is a prerequisite for Phase 15 text extraction. Inspect sample docs early to determine whether Phase 15 is blocked on Phase 9 or can proceed independently.
+- [ ] **Insurer classification breadth** — `_detect_insurer()` (Phase 13) uses text-matching heuristics. Anthem operates under multiple brand names (Anthem BCBS, Empire BlueCross, Amerigroup, etc.) — the phrase list will need to be expanded from real EOB text. Document the expansion in `src/medical/extractors/allowlist.py` as a comment alongside each entry.
+- [ ] **Annotation CSV privacy** — annotation CSVs contain real medical field values (service dates, amounts, claim numbers). They are safe to commit because they contain no PHI beyond what's already in the user's own SQLite DB, but the sample PDFs themselves must never be committed. Add `experiments/medical/*/sample/` to `.gitignore`.
