@@ -3,8 +3,11 @@ Registry of deterministic extractors eligible for dispatch (Phase 13).
 
 Each entry shape:
     {
-        "insurer": str,            # must be a valid insurer key (see
-                                   # _INSURER_PHRASE_MAP in extraction.py)
+        "insurer": str,            # must be a valid insurer key — i.e. one of
+                                   # the right-hand values in _INSURER_PHRASE_MAP
+                                   # (src/medical/eob/anchors.py). These key
+                                   # strings are the single source of truth for
+                                   # insurer identity; do not invent new ones.
         "doc_type": str,           # 'statement' | 'eob' | 'receipt' | 'check'
         "extractor_version": str,  # human-readable version tag for logging
         "module": str,             # importable module name relative to

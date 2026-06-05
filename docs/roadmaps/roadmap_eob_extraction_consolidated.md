@@ -226,14 +226,61 @@ print(doc2.source, len(doc2.words))
 ## Phase 2: Deterministic Anthem extraction — engine + profile + gate
 **What's true when this is done:** `process_eob` returns a correct `EOBDocument` for the Anthem fixtures (1 / ~12 / 2 claims; subtype summary/denial/payment_notice; tables stitched across pages; `subscriber != claims[0].patient`); `ANTHEM_PROFILE` clears ≥90% precision / N≥15 in `run_all_extractor_evals.py`; an unknown issuer returns `UnknownType`.
 
-- [ ] Implement `identify(doc) -> str | None` in `src/medical/eob/identify.py`: anchor on issuer name → issuer key (one key covers all Anthem form versions)
-- [ ] Implement the shared `segment(doc, signatures) -> list[Block]` engine (`blocks.py`) and the generic `parse_table(block, spec)` primitive (`tables.py`): header-derived column x-centers, nearest-column bucketing, stitch across `block.page_span`, stop at `row_terminator`
-- [ ] Implement the generic `ProfileExtractor` + `IssuerProfile`/`Signature`/`ColumnSpec` in `profiles/__init__.py`: segment → route → `pair_claims` → `assemble_claim` → `EOBDocument`; satisfies `Extractor`, carries no issuer-specific logic
-- [ ] Build `ANTHEM_PROFILE` in `profiles/anthem.py`: Anthem signatures, `ColumnSpec` (incl. the visually-separated magenta `your_total` anchor), block extractors (`claim_table` via `parse_table`; `claim_banner` → claim_number/received/doctor/patient/owes/in_network; `header` → subscriber; `doc_banner` → subtype); register `REGISTRY["anthem"]`
-- [ ] Implement `validate(eob, source)` in `validate.py`: per-claim arithmetic reconciliation (±$0.01); subtype-aware owe interpretation (denial/duplicate/payment_notice ≠ "you owe $X"); reason-code aware (ADU=pending, 033=filing-limit, A1=duplicate); higher confidence for `source TEXT`
-- [ ] Implement `process_eob` in `pipeline.py` per the contract (no LLM yet → unknown returns `UnknownType`)
+- [x] Implement `identify(doc) -> str | None` in `src/medical/eob/identify.py`: anchor on issuer name → issuer key (one key covers all Anthem form versions)
+- [x] Implement the shared `segment(doc, signatures) -> list[Block]` engine (`blocks.py`) and the generic `parse_table(block, spec)` primitive (`tables.py`): header-derived column x-centers, nearest-column bucketing, stitch across `block.page_span`, stop at `row_terminator`
+- [x] Implement the generic `ProfileExtractor` + `IssuerProfile`/`Signature`/`ColumnSpec` in `profiles/__init__.py`: segment → route → `pair_claims` → `assemble_claim` → `EOBDocument`; satisfies `Extractor`, carries no issuer-specific logic
+- [x] Build `ANTHEM_PROFILE` in `profiles/anthem.py`: Anthem signatures, `ColumnSpec` (incl. the visually-separated magenta `your_total` anchor), block extractors (`claim_table` via `parse_table`; `claim_banner` → claim_number/received/doctor/patient/owes/in_network; `header` → subscriber; `doc_banner` → subtype); register `REGISTRY["anthem"]`
+- [x] Implement `validate(eob, source)` in `validate.py`: per-claim arithmetic reconciliation (±$0.01); subtype-aware owe interpretation (denial/duplicate/payment_notice ≠ "you owe $X"); reason-code aware (ADU=pending, 033=filing-limit, A1=duplicate); higher confidence for `source TEXT`
+- [x] Implement `process_eob` in `pipeline.py` per the contract (no LLM yet → unknown returns `UnknownType`)
 - [ ] Run the dobby playbook against `ANTHEM_PROFILE`: annotate N≥15 samples under `experiments/medical/anthm_eob/`, wire `eval_anthm_eob.run_eval` into the existing `run_all_extractor_evals.py`, loop on failure modes (multi-page stitch, 2-digit years, $0.00 rows, sparse Totals miscount) until ≥90%, register the registry/allowlist entry
-- [ ] Write `tests/test_eob_extraction.py`: `parse_table` on the screenshot crop (all columns incl. narrow right-side + magenta total); multi-page stitch on the denial fixture; `segment` finds N banner+table pairs; subtype per fixture; claim counts 1/≈12/2; assert `ProfileExtractor` holds no Anthem-specific logic
+- [x] Write `tests/test_eob_extraction.py`: `parse_table` on the screenshot crop (all columns incl. narrow right-side + magenta total); multi-page stitch on the denial fixture; `segment` finds N banner+table pairs; subtype per fixture; claim counts 1/≈12/2; assert `ProfileExtractor` holds no Anthem-specific logic
+
+### Handoff — Phase 2
+**Completed:** 2026-06-05
+**Branch:** main
+**Tests:** `pytest tests/ -x -q` — 291 passed, 0 failed
+
+#### What was built
+The deterministic EOB extraction engine is complete: `identify()` in `anchors.py` maps issuer phrases → keys; `segment()` in `blocks.py` breaks a `Document` into typed `Block`s by sliding-window anchor detection; `parse_table()` in `tables.py` buckets words into named columns by nearest x-center and stitches across pages; `ProfileExtractor` in `profiles/__init__.py` orchestrates the full pipeline (zero Anthem-specific logic) with private `_pair_claims`/`_assemble_claim` helpers; `ANTHEM_PROFILE` in `profiles/anthem.py` wires up Anthem's four signatures, 12-column table spec, and block field parsers; `validate()` in `validate.py` runs per-claim arithmetic with subtype/reason-code awareness; `process_eob()` in `pipeline.py` is the public entry point. A critical cross-path fix was made: `from_text_layer` now scales fitz PDF-point coordinates to OCR-DPI pixels (`× 300/72`) so text-layer and OCR documents share one coordinate space for column bucketing. The insurer key `"anthm"` was renamed to `"anthem"` atomically across `anchors.py`, `extraction.py`, and `allowlist.py`.
+
+#### Files changed
+- **`src/medical/eob/anchors.py`** — key `"anthm"` → `"anthem"`; added public `identify(text)` function
+- **`src/medical/eob/document.py`** — `from_text_layer` now scales coords to OCR-DPI pixels; added `OCR_DPI = 300` constant
+- **`src/medical/eob/blocks.py`** *(new)* — `Block` frozen dataclass + `segment()` segmentation engine
+- **`src/medical/eob/tables.py`** *(new)* — `parse_table()` nearest-column bucketing + multi-page stitching
+- **`src/medical/eob/profiles/__init__.py`** *(new)* — `Signature`, `ColumnSpec`, `IssuerProfile`, `ProfileExtractor`
+- **`src/medical/eob/profiles/anthem.py`** *(new)* — `ANTHEM_PROFILE` with 4 signatures, 12-column spec, 4 block extractors
+- **`src/medical/eob/validate.py`** *(new)* — `validate()` + `_parse_amount()` helper
+- **`src/medical/eob/pipeline.py`** *(new)* — `process_eob()` + `REGISTRY`
+- **`src/medical/eob/__init__.py`** — exports `process_eob`, `REGISTRY`, `validate`
+- **`src/medical/extraction.py`** — removed `_detect_insurer`; now imports `identify` from `anchors`
+- **`src/medical/extractors/allowlist.py`** — comment added: insurer keys must match `_INSURER_PHRASE_MAP`
+- **`src/medical/scripts/run_all_extractor_evals.py`** — comment noting where to register Anthem eval once N≥15 samples exist
+- **`experiments/__init__.py`**, **`experiments/medical/__init__.py`**, **`experiments/medical/anthm_eob/__init__.py`** *(new)*
+- **`experiments/medical/anthm_eob/annotations.csv`** *(new)* — header-only scaffold
+- **`experiments/medical/anthm_eob/eval_anthm_eob.py`** *(new)* — `run_eval()` with vacuous-pass at n<15
+- **`tests/test_eob_extraction.py`** *(new)* — 18 tests
+- **`tests/test_medical_extraction.py`** — updated `"anthm"` → `"anthem"` key references
+
+#### How to verify manually
+```python
+from src.medical.eob.document import to_document
+from src.medical.eob.pipeline import process_eob
+from src.medical.eob.types import Extracted
+
+data = open("/Users/jgfrussell/Git/luigi-docs/EOBs/anthem EOB denial.pdf", "rb").read()
+doc = to_document(data)           # requires tesseract installed locally
+result = process_eob(doc)
+assert isinstance(result, Extracted)
+print(result.eob.subtype, len(result.eob.claims))
+print(result.validation)
+```
+
+#### Open questions / deferred decisions for Phase 3
+- **Column x-centers unvalidated**: `ANTHEM_PROFILE` column geometry is estimated at 300 DPI; claim field extraction (amounts, dates) will likely need tuning once real EOBs are run through `eval_anthm_eob.run_eval` with N≥15 verified samples. The eval scaffold is wired and ready — annotate `experiments/medical/anthm_eob/annotations.csv` then call `python -m experiments.medical.anthm_eob.eval_anthm_eob`.
+- **Eval task remains open**: the dobby playbook / ≥90% precision gate checkbox is intentionally left unchecked — it requires real annotated EOB samples not available in CI. Wire into `run_all_extractor_evals.py` only after the precision bar is cleared locally.
+- **LLM branch**: `process_eob(doc, llm_override=True)` raises `NotImplementedError` — Phase 3 delivers this.
+- **`_extract_claim_banner` regex**: first-pass patterns; real Anthem formatting may require adjustment once tested against actual PDFs.
 
 ## Phase 3: LLM vision fallback + consent
 **What's true when this is done:** an unknown-issuer EOB plus explicit user consent → `process_eob(doc, llm_override=True)` returns `Extracted` via the vision model with `extractor="llm"` and a populated `EOBDocument`; declining stops and logs; the unknown doc is flagged for a future profile. Consent is scoped to the EOB engine only — the existing bill/statement LLM path is unchanged.

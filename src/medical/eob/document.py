@@ -40,23 +40,32 @@ def _render_page_png(page: Any, dpi: int) -> bytes:
 
 
 def from_text_layer(stream: bytes) -> Document:
-    """Build a Document from a PDF's native text layer (word bboxes + page PNGs)."""
+    """
+    Build a Document from a PDF's native text layer (word bboxes + page PNGs).
+
+    fitz returns word coordinates in PDF user-space points (~612 pt wide for an
+    8.5" page). The OCR path (``from_ocr``) yields pixel coordinates at OCR_DPI
+    (~2550 px wide for the same page). To keep both paths in ONE coordinate
+    space so downstream table parsing can bucket columns by x, every coordinate
+    here is scaled from points -> OCR-DPI pixels by OCR_DPI / 72.
+    """
     import fitz
 
     all_words: list[Word] = []
     page_texts: list[str] = []
     page_images: list[bytes] = []
 
+    scale = OCR_DPI / 72
     with fitz.open(stream=stream, filetype="pdf") as pdf:
         for p, page in enumerate(pdf):
             for w in page.get_text("words"):
                 all_words.append(
                     Word(
                         text=w[4],
-                        x0=int(w[0]),
-                        y0=int(w[1]),
-                        x1=int(w[2]),
-                        y1=int(w[3]),
+                        x0=int(w[0] * scale),
+                        y0=int(w[1] * scale),
+                        x1=int(w[2] * scale),
+                        y1=int(w[3] * scale),
                         page=p,
                     )
                 )

@@ -38,34 +38,17 @@ from pydantic import BaseModel, ValidationError
 from pypdf import PdfReader
 
 from src.config import get_settings
-from src.medical.eob.anchors import _INSURER_PHRASE_MAP
+from src.medical.eob.anchors import identify
 from src.medical.extractors.allowlist import EXTRACTOR_ALLOWLIST
 from src.medical.layout import detect_relevant_pages, load_template, update_template
 
 logger = logging.getLogger(__name__)
 
 
-# Coarse insurer detection for deterministic-extractor dispatch (Phase 13).
-# Valid insurer keys are the right-hand values here; allowlist entries must
-# reference one of them. The phrase map now lives in src/medical/eob/anchors.py
-# so it is shared with the EOB classifier's anchor-rescue gate.
-
-
-def _detect_insurer(text: str) -> Optional[str]:
-    """
-    Return the insurer key whose phrase appears in `text`, or None.
-
-    Never raises — returns None on any error.
-    """
-    try:
-        lowered = text.lower()
-        for phrase, insurer in _INSURER_PHRASE_MAP:
-            if phrase in lowered:
-                return insurer
-        return None
-    except Exception:
-        logger.error("_detect_insurer: unexpected failure", exc_info=True)
-        return None
+# Coarse insurer detection for deterministic-extractor dispatch (Phase 13) is
+# provided by `identify` (imported from src.medical.eob.anchors), which reads
+# the shared _INSURER_PHRASE_MAP. Valid insurer keys are that map's right-hand
+# values; allowlist entries must reference one of them.
 
 # Below this many characters of extracted text *per page*, a PDF is treated as
 # scanned/sparse and routed to the rasterization (vision) path instead of text.
@@ -385,7 +368,7 @@ def extract_from_file(
                 #
                 # Detect the insurer on the ORIGINAL full text (before layout
                 # filtering) so brand phrases on dropped pages still count.
-                insurer = _detect_insurer(text)
+                insurer = identify(text)
                 prompt, doc_type_hint = _select_prompt(text)
                 if db_path is not None:
                     stored = load_template(db_path, doc_type_hint, practice_id)

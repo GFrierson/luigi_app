@@ -580,7 +580,7 @@ def test_extraction_stored_indices_out_of_bounds_falls_back():
 # Phase 13: insurer detection + deterministic-extractor dispatch
 # ---------------------------------------------------------------------------
 
-from src.medical.extraction import _detect_insurer  # noqa: E402
+from src.medical.eob.anchors import identify  # noqa: E402
 
 # Dense anthem-labelled text that clears SPARSE_TEXT_THRESHOLD on the single
 # page, routing extract_from_file into the dense-text dispatch branch.
@@ -588,16 +588,16 @@ _ANTHEM_DENSE_TEXT = "Anthem Blue Cross Blue Shield of Georgia EOB " * 10
 
 
 def test_detect_insurer_anthem_text():
-    """Anthem brand phrases (full BCBS-of-Georgia and bare 'BCBS') map to 'anthm'."""
+    """Anthem brand phrases (full BCBS-of-Georgia and bare 'BCBS') map to 'anthem'."""
     assert (
-        _detect_insurer("Anthem Blue Cross Blue Shield of Georgia EOB") == "anthm"
+        identify("Anthem Blue Cross Blue Shield of Georgia EOB") == "anthem"
     )
-    assert _detect_insurer("BCBS Summary") == "anthm"
+    assert identify("BCBS Summary") == "anthem"
 
 
 def test_detect_insurer_returns_none_for_unknown():
     """An unrecognized insurer name yields None."""
-    assert _detect_insurer("Cigna Healthcare Member EOB") is None
+    assert identify("Cigna Healthcare Member EOB") is None
 
 
 def test_dispatch_routes_to_registered_extractor():
@@ -626,7 +626,7 @@ def test_dispatch_routes_to_registered_extractor():
         "src.medical.extraction.EXTRACTOR_ALLOWLIST",
         [
             {
-                "insurer": "anthm",
+                "insurer": "anthem",
                 "doc_type": "eob",
                 "extractor_version": "anthm_eob_v1",
                 "module": "anthm_eob",
@@ -680,7 +680,7 @@ def test_dispatch_falls_through_to_llm_when_extractor_returns_none():
         "src.medical.extraction.EXTRACTOR_ALLOWLIST",
         [
             {
-                "insurer": "anthm",
+                "insurer": "anthem",
                 "doc_type": "eob",
                 "extractor_version": "anthm_eob_v1",
                 "module": "anthm_eob",

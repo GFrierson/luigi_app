@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 
 # Add one entry per eval script as Phases 14/15 complete.
 # Entry shape: {"name": str, "run_eval": Callable[[], dict]}
+#
+# Anthem EOB eval (Phase 2) is intentionally NOT registered here yet — it is
+# manual/local-only until N>=15 EOB samples are annotated in
+# experiments/medical/anthm_eob/annotations.csv. Once that threshold is met,
+# register it like so:
+#     from experiments.medical.anthm_eob.eval_anthm_eob import run_eval
+#     _REGISTERED_EVALS.append({"name": "anthm_eob", "run_eval": run_eval})
 _REGISTERED_EVALS: list[dict] = []
 
 
