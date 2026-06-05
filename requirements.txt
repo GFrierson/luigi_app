@@ -1,3 +1,4 @@
+# Requires Python >= 3.12 (EOB types use the PEP 695 `type` union syntax).
 openai>=1.10.0
 python-telegram-bot>=21.0
 apscheduler>=3.10.0
@@ -11,3 +12,10 @@ pypdf>=4.0.0
 # pdf2image renders scanned (no-text-layer) PDFs to raster images.
 # Requires the Poppler system binary: apt: poppler-utils / brew: poppler
 pdf2image>=1.16.0
+# pymupdf (fitz): canonical text-layer word-bbox extraction + page rasterization for EOB.
+# Bundles its own native libs (no extra apt package needed beyond the wheel).
+# Requires Python >= 3.12 (for the type union syntax in src/medical/eob/types.py).
+pymupdf>=1.24.0
+# pytesseract: OCR wrapper for image PDFs.
+# Requires the Tesseract system binary: apt: tesseract-ocr / brew: tesseract
+pytesseract>=0.3.10

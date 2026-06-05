@@ -240,27 +240,70 @@ A `src/medical/extractors/` package scaffold provides the allowlist-based dispat
 ---
 
 ## Phase 14: Anthem EOB Parser
-**What's true when this is done:** Anthem EOB PDFs (text-layer) produce an `ExtractionResult` deterministically without an LLM call, at ≥ 90% precision on N ≥ 15 annotated docs (multi-field extractor). The extractor is registered in the allowlist, dispatched from `extract_from_file()`, and covered by the shared eval runner.
+**What's true when this is done:** Anthem EOB PDFs produce an `ExtractionResult` deterministically without an LLM call, at ≥ 90% precision on N ≥ 15 annotated docs (multi-field extractor). The extractor is registered in the allowlist, dispatched from `extract_from_file()`, and covered by the shared eval runner. Subscriber and patient are captured as distinct fields.
 
 **Blocked by:** Phase 13 complete. Can start in parallel with Phases 9–12 — no dependency on scanned PDF rendering or claim-matching work.
 
-**Sample location:** `/Users/jgfrussell/Git/luigi-docs/Anthem EOBs/Standard EOB`
+**Sample location:** `/Users/jgfrussell/Git/luigi-docs/Anthem EOBs/Standard EOB` (30 PDFs)
 
-**Playbook steps (follow Extractor Playbook above):**
+> ### ⚠️ Revised approach (decided 2026-06-04) — supersedes the text-regex spec below
+>
+> **The original spec assumed a selectable text layer. It does not exist.** All 30 sample
+> EOBs are image-only AFP-to-PDF documents (`/Creator: Ricoh Production Print Solutions Afp2Pdf`);
+> pypdf returns 0 chars on every file, so an `extract(text: str)` regex extractor cannot fire.
+> The EOBs are a fixed template that never changes format, so the approach is **OCR + deterministic
+> positional extraction**. Full design saved at
+> `~/.claude/plans/why-go-through-all-clever-otter.md`.
+>
+> **Method:**
+> 1. Rasterize with PyMuPDF (`fitz`) `page.get_pixmap(dpi=300)`.
+> 2. OCR to text + word bounding boxes via `pytesseract.image_to_data(...)`.
+> 3. Extract fields by anchoring on fixed labels (`Claim Number:`, `Received:`, `Doctor:`,
+>    `Totals:`) and **bucketing tokens into columns by x-coordinate** — NOT by whitespace
+>    (Tesseract collapses empty cells into stray dots, which makes flat-text regex miscount
+>    columns on sparse rows). Column boundaries are derived from the detected header-row label
+>    x-centers (auto-scales with dpi); empty cells simply yield no token in that x-range.
+> 4. **Arithmetic validation** as a free correctness signal: per-row and per-column sums must
+>    reconcile (±$0.01). Failure → return `None` → fall through to the LLM.
+>
+> **Data-model decisions:**
+> - **Subscriber ≠ patient.** EOBs carry a subscriber (plan member, e.g. "James G Frierson")
+>   who often differs from the patient on a claim line (e.g. "Shanelle Russell"). The medical
+>   model has no person concept today. Decision: **denormalized** — add `subscriber_name`
+>   (document-level, on `ExtractionResult`) and `patient_name` (per-claim, on `ExtractedClaim`
+>   and as `claims` TEXT columns). No persons table / matching in v1. Known limitation: the
+>   `claims` UNIQUE key cannot add `patient_name` without a SQLite table rebuild — two patients
+>   sharing date/practice/amount could still collide (follow-up).
+> - **Scaffolding: full playbook harness** (annotate + annotations.csv + blocking ≥90%/N≥15 gate).
+>
+> **New runtime dependencies:** PyMuPDF, pytesseract (add to `requirements.txt`) + the
+> **tesseract system binary** (`brew install tesseract` / `apt: tesseract-ocr`). See Blockers.
+>
+> **New dispatch path:** image-only PDFs hit the sparse branch (rasterize→LLM) and never reach
+> the dense-branch extractor dispatch. Add an OCR dispatch in the sparse branch gated on the AFP
+> `/Creator` signature; detect insurer from OCR text; allowlist entries gain `"input": "ocr"`.
 
-- [ ] **Sample** — collect N ≥ 15 Anthem EOB PDFs. Save to `experiments/medical/anthm_eob/sample/`. Note layout variants: single-claim vs. multi-claim, electronic delivery vs. paper-scan, standard EOB vs. coordination-of-benefits EOB.
-- [ ] **Annotate** — manually fill true values for each doc. Target fields: `service_date`, `practice_name`, `provider_name`, `billed_amount`, `allowed_amount`, `plan_paid`, `member_responsibility`, `claim_number`, `procedure_codes` (list), `diagnosis_codes` (list). Commit as `experiments/medical/anthm_eob/annotations.csv` with `_review_status=verified` per row.
-- [ ] **Annotation script** — `src/medical/scripts/annotate_anthm_eob.py`: reads PDFs in sample directory, extracts text via pypdf, pre-fills `_hyp_*` columns using heuristic label searches (e.g., `"Claim Number"`, `"Billed Amount"`, `"Plan Paid"`), writes `annotations.csv` with `_true_*` columns blank for manual fill. Prints a summary of which fields had hypothesis hits vs. misses.
-- [ ] **Eval script** — `src/medical/scripts/eval_anthm_eob.py`: reads verified rows from `annotations.csv`, calls `extract(text)` from `anthm_eob.py`, compares each field, prints precision / recall / N per field, PASS / FAIL vs. gate (≥ 90%, N ≥ 15). Export `run_eval(sample_dir: str, annotations_path: str) -> dict` for use by the shared runner.
+**Playbook steps (OCR-adapted — follow Extractor Playbook above):**
+
+- [ ] **Dependencies** — add `PyMuPDF>=1.24.0` and `pytesseract>=0.3.10` to `requirements.txt` with a tesseract system-dependency comment; `brew install tesseract` locally.
+- [ ] **Calibration spike** — install tesseract, OCR 2–3 samples, dump `image_to_data`, confirm the header-anchor column detection picks up every money column; lock the header label set.
+- [ ] **OCR module** — `src/medical/ocr.py`: `rasterize(file_path, dpi=300)` (fitz), `ocr_pages(images)` (pytesseract word boxes → `OcrWord`/`OcrPage` dataclasses), `ocr_pdf(file_path)`. Deferred imports; never raises, returns `[]` on failure.
+- [ ] **Sample** — copy the 24 `unlocked_*.pdf` (N=24 ≥ 15) to `experiments/medical/anthm_eob/sample/` (already gitignored). Note variants: single- vs. multi-claim, subscriber = vs. ≠ patient.
+- [ ] **Schema** — add `patient_name`/`subscriber_name` to `ExtractedClaim`/`ExtractionResult`; idempotent `ALTER TABLE claims ADD COLUMN` migrations in `init_db()`; thread through `create_claim` and `commit_ingestion`; surface in the confirmation message; update `EOB_PROMPT`/`_JSON_SCHEMA_HINT` for the LLM fallback.
+- [ ] **Annotation script** — `src/medical/scripts/annotate_anthm_eob.py`: OCR each sample, pre-fill `_hyp_*` via the extractor's field anchors; a vision subagent reads ~6–8 rendered samples to seed candidate `_true_*` values (rows stay `pending` until personally verified). One row per claim. Fields: `subscriber_name`, `patient_name`, `claim_number`, `service_date`, `doctor_name`, `billed_amount`, `allowed_amount`, `plan_paid`, `member_owed`, `services_not_covered`.
+- [ ] **Annotate** — verify pre-filled rows against the PDFs; set `_review_status=verified`. Commit `experiments/medical/anthm_eob/annotations.csv` (CSV only, never the sample PDFs).
+- [ ] **Eval script** — `src/medical/scripts/eval_anthm_eob.py`: reads verified rows, runs `extract_from_ocr(pages)`, compares per field (string: case-insensitive; money: ±$0.01), prints precision/recall/N, PASS/FAIL/SKIP vs. gate. Export `run_eval(sample_dir, annotations_path) -> dict`.
 - [ ] **Build extractor** — `src/medical/extractors/anthm_eob.py`:
   - `EXTRACTOR_VERSION = "anthm_eob_v1"` at module level
-  - `extract(text: str) -> Optional[ExtractionResult]` — label-based text extraction; never raises
-  - Label targets (tune from real docs): `"Service Date"` / `"Date of Service"`, `"Billed"` / `"Billed Amount"`, `"Allowed"`, `"Plan Paid"`, `"Your Responsibility"` / `"Member Responsibility"`, `"Claim Number"` / `"Claim #"`, provider block (look for `"Provider:"` or rendering provider header), procedure code block (`CPT:` or table column)
-  - Return `None` and `logger.error(..., exc_info=True)` on any parse failure; caller falls through to LLM
-- [ ] **Review-and-improve loop** — typical failure modes to watch for: multi-claim EOBs with one row per claim (need to iterate claim rows, not just find first label); `"Plan Paid"` vs. `"Check Amount"` label drift across EOB versions; date format variants (`MM/DD/YYYY` vs. `MMM DD, YYYY`); procedure codes in a table vs. inline. Fix by root cause, add a pinning unit test per fix, re-run eval.
+  - `extract_from_ocr(pages: list[OcrPage]) -> Optional[ExtractionResult]` (primary); `extract(text)` returns `None` (text path unsupported)
+  - Anchor on `Claim Number:` / `Received:` / `Doctor:` / `Totals:`; column-bucket line items by header-derived x-ranges; `_validate_arithmetic` row/column reconciliation gate
+  - Map: `billed_amount`=doctor charges, `allowed_amount`=max allowed, `plan_paid`=Anthem paid, `member_owed`=member responsibility; `subscriber_name` (doc-level), `patient_name` (per claim)
+  - Return `None` + `logger.error(..., exc_info=True)` on any failure; caller falls through to LLM
+- [ ] **Dispatch** — sparse-branch OCR dispatch gated on AFP `/Creator`; insurer from OCR text (extend `_INSURER_PHRASE_MAP` with "empire bluecross"); allowlist entries branch on `"input"` (`"text"`/`"ocr"`).
+- [ ] **Review-and-improve loop** — failure modes to watch: multi-claim EOBs spanning pages; `MM/DD/YY` 2-digit year → ISO; multi-service-line claim totals; $0.00 member-responsibility rows; column miscount on sparse Totals rows. Fix by root cause, pin each with a unit test, re-run eval.
 - [ ] **Gate** — precision ≥ 90%, N ≥ 15. Run `run_all_extractor_evals.py` (exit 0) as the gate record.
-- [ ] **Register** — add `{ "insurer": "anthm", "doc_type": "eob", "extractor_version": "anthm_eob_v1" }` to `EXTRACTOR_ALLOWLIST`; add `run_eval` import to `run_all_extractor_evals.py`.
-- [ ] **Tests** — `tests/test_medical_extractors.py`: happy path extracts correct `service_date`, `billed_amount`, `plan_paid` from a minimal fixture string; multi-claim EOB iterates all claim rows; `claim_number` not found returns `None` (not a crash); gate score committed as a comment in the test file header.
+- [ ] **Register** — add `{ "insurer": "anthm", "doc_type": "eob", "extractor_version": "anthm_eob_v1", "module": "anthm_eob", "input": "ocr" }` to `EXTRACTOR_ALLOWLIST`; add `run_eval` import to `run_all_extractor_evals.py`.
+- [ ] **Tests** — `tests/test_medical_extractors.py` (+ `tests/test_medical_ocr.py`): happy-path single-claim from an `OcrPage` fixture (correct `service_date`, `billed_amount`, `plan_paid`, `member_owed`, distinct subscriber vs patient); multi-claim iterates all blocks; sparse Totals row buckets without miscount; arithmetic-fail fixture returns `None`; malformed pages return `None` (no crash); `create_claim` persists `patient_name`/`subscriber_name`; `run_eval` with no verified rows → SKIP. Gate score committed as a header comment.
 
 ---
 
@@ -290,6 +333,7 @@ A `src/medical/extractors/` package scaffold provides the allowlist-based dispat
 ## Blockers & Open Questions
 
 - [ ] **Poppler system dependency** — `pdf2image` requires Poppler binaries installed at the OS level. This needs to be documented in the project README and added to any deployment scripts or Dockerfiles. The VPS deployment process must be updated before Phase 9 ships.
+- [ ] **Tesseract system dependency (Phase 14)** — the OCR-based Anthem EOB extractor requires the `tesseract` binary (`brew install tesseract` / `apt: tesseract-ocr`) plus the `PyMuPDF` and `pytesseract` Python packages. Tesseract is NOT currently installed on the VPS. Until it is, the extractor returns `None` and Anthem EOBs fall through to the LLM (graceful, but no determinism gain). Add to the project README and deployment scripts before Phase 14 ships.
 - [ ] **Template keying by insurer vs. practice** — the `document_templates` schema keys templates on `(doc_type, practice_id)`. EOBs from the same insurer but different practices may have identical layouts. If this proves true in practice, add an `insurer_id` key column and a fallback lookup chain: `(doc_type, practice_id)` → `(doc_type, insurer_id)` → `(doc_type, NULL)`. Deferred until second insurer enters the picture.
 - [ ] **Multi-image vision token cost** — combining N album photos into one vision call increases per-call token usage. For 3-page photo albums this is acceptable; for large albums (>6 images) it may exceed model context or become expensive. Add a `MAX_ALBUM_IMAGES` guard (suggest 6) with a user-facing message if exceeded.
 - [ ] **Correction loop and `practice_id_by_name` consistency** — `apply_correction` must keep `practice_id_by_name` in sync when a practice name correction resolves to an existing DB row vs. a new entity. The `rematch_after_correction` step must re-run `match_practice` against the DB so the corrected name gets a real `practice_id` before `confirm` is processed.

@@ -159,7 +159,15 @@ Users can opt out by sending `stop`.
    LOG_LEVEL=INFO
    ```
 
-3. Install dependencies:
+3. Install system dependencies (Poppler + Tesseract for PDF rasterization and OCR):
+   ```bash
+   # macOS
+   brew install poppler tesseract
+   # Linux/VPS
+   apt-get install -y poppler-utils tesseract-ocr
+   ```
+
+4. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
@@ -183,13 +191,21 @@ No ngrok or port forwarding needed — Luigi uses Telegram's polling API.
    # Edit .env with your credentials
    ```
 
-2. Create a virtual environment and install dependencies:
+2. Install system dependencies (Poppler + Tesseract for PDF rasterization and OCR):
+   ```bash
+   # macOS
+   brew install poppler tesseract
+   # Linux/VPS
+   apt-get install -y poppler-utils tesseract-ocr
+   ```
+
+3. Create a virtual environment and install dependencies:
    ```bash
    python -m venv .venv
    .venv/bin/pip install -r requirements.txt
    ```
 
-3. Install and enable the systemd service:
+4. Install and enable the systemd service:
    ```bash
    cp deploy/luigi.service /etc/systemd/system/luigi.service
    systemctl daemon-reload
@@ -197,7 +213,7 @@ No ngrok or port forwarding needed — Luigi uses Telegram's polling API.
    systemctl start luigi
    ```
 
-4. Check logs:
+5. Check logs:
    ```bash
    journalctl -u luigi -f
    ```

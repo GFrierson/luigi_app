@@ -1,3 +1,8 @@
+# Prerequisite system packages (install before first start):
+#   poppler-utils  — scanned-PDF rasterization (pdf2image)
+#   tesseract-ocr  — OCR for image/garbage-layer EOB PDFs (pytesseract)
+# Debian/Ubuntu: apt-get install -y poppler-utils tesseract-ocr
+
 [Unit]
 Description=Luigi Health Tracker Bot
 After=network.target

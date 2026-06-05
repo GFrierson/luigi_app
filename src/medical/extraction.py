@@ -38,6 +38,7 @@ from pydantic import BaseModel, ValidationError
 from pypdf import PdfReader
 
 from src.config import get_settings
+from src.medical.eob.anchors import _INSURER_PHRASE_MAP
 from src.medical.extractors.allowlist import EXTRACTOR_ALLOWLIST
 from src.medical.layout import detect_relevant_pages, load_template, update_template
 
@@ -46,12 +47,8 @@ logger = logging.getLogger(__name__)
 
 # Coarse insurer detection for deterministic-extractor dispatch (Phase 13).
 # Valid insurer keys are the right-hand values here; allowlist entries must
-# reference one of them. Expand with real EOB brand names as needed.
-_INSURER_PHRASE_MAP: list[tuple[str, str]] = [
-    ("blue cross blue shield of georgia", "anthm"),
-    ("anthem", "anthm"),
-    ("bcbs", "anthm"),
-]
+# reference one of them. The phrase map now lives in src/medical/eob/anchors.py
+# so it is shared with the EOB classifier's anchor-rescue gate.
 
 
 def _detect_insurer(text: str) -> Optional[str]:
