@@ -458,7 +458,7 @@ def extract_from_file(
         # backing model rejects it, the SDK will raise — caught below.
         try:
             response = client.chat.completions.create(
-                model=config.VISION_MODEL,
+                model=config.LLM_VISION_MODEL,
                 messages=messages,
                 response_format={"type": "json_object"},
                 max_tokens=2000,
@@ -466,11 +466,11 @@ def extract_from_file(
         except Exception:
             logger.warning(
                 f"Vision call with response_format=json_object failed; "
-                f"retrying without that hint for model='{config.VISION_MODEL}'",
+                f"retrying without that hint for model='{config.LLM_VISION_MODEL}'",
                 exc_info=True,
             )
             response = client.chat.completions.create(
-                model=config.VISION_MODEL,
+                model=config.LLM_VISION_MODEL,
                 messages=messages,
                 max_tokens=2000,
             )

@@ -285,11 +285,49 @@ print(result.validation)
 ## Phase 3: LLM vision fallback + consent
 **What's true when this is done:** an unknown-issuer EOB plus explicit user consent → `process_eob(doc, llm_override=True)` returns `Extracted` via the vision model with `extractor="llm"` and a populated `EOBDocument`; declining stops and logs; the unknown doc is flagged for a future profile. Consent is scoped to the EOB engine only — the existing bill/statement LLM path is unchanged.
 
-- [ ] Add `LLM_VISION_MODEL` to `src/config.py`; reuse the existing OpenRouter client (verify image input via OpenRouter — Blockers)
-- [ ] Implement `LLMVisionExtractor` in `src/medical/eob/extractors/llm.py` satisfying `Extractor`: send `page_images` + a prompt returning the `EOBDocument` shape (subtype, subscriber, claims); parse JSON → `EOBDocument`
-- [ ] Wire `llm_override` into `process_eob` (unknown + override → `LLM_EXTRACTOR`, `extractor="llm"`)
-- [ ] Implement `log_unknown(doc, result, db_path)` in `corpus.py`: flag the stored `documents` row as unknown-issuer and retain the `page_images` reference (reuse existing on-disk document storage — no separate PHI corpus)
-- [ ] Write `tests/test_eob_llm.py`: override path on a non-Anthem (Cigna) fixture → `Extracted` with `extractor="llm"` (mock the API); `log_unknown` writes the expected flag
+- [x] Add `LLM_VISION_MODEL` to `src/config.py`; reuse the existing OpenRouter client (verify image input via OpenRouter — Blockers)
+- [x] Implement `LLMVisionExtractor` in `src/medical/eob/extractors/llm.py` satisfying `Extractor`: send `page_images` + a prompt returning the `EOBDocument` shape (subtype, subscriber, claims); parse JSON → `EOBDocument`
+- [x] Wire `llm_override` into `process_eob` (unknown + override → `LLM_EXTRACTOR`, `extractor="llm"`)
+- [x] Implement `log_unknown(doc, result, db_path)` in `corpus.py`: flag the stored `documents` row as unknown-issuer and retain the `page_images` reference (reuse existing on-disk document storage — no separate PHI corpus)
+- [x] Write `tests/test_eob_llm.py`: override path on a non-Anthem (Cigna) fixture → `Extracted` with `extractor="llm"` (mock the API); `log_unknown` writes the expected flag
+
+### Handoff — Phase 3
+**Completed:** 2026-06-05
+**Branch:** main
+**Tests:** `pytest tests/ -x -q` — 293 passed, 0 failed
+
+#### What was built
+The LLM vision fallback is now wired end-to-end: `LLMVisionExtractor` in `src/medical/eob/extractors/llm.py` satisfies the `Extractor` Protocol, base64-encoding `doc.page_images` as data URIs and prompting the OpenRouter vision model for a JSON `EOBDocument`; it never raises and defaults to `issuer="unknown", subtype="summary"` on failure. `process_eob(doc, llm_override=True)` now routes unknown issuers through `LLM_EXTRACTOR` and returns `Extracted(..., extractor="llm")`. `log_unknown(document_id, db_path)` in `corpus.py` stamps `documents.notes = 'eob:unknown_issuer'` for post-hoc profile authoring. `VISION_MODEL` was renamed to `LLM_VISION_MODEL` atomically across config, extraction.py, and the test mock stub.
+
+#### Files changed
+- **`src/config.py`** — renamed `Settings.VISION_MODEL` field and `os.getenv` key to `LLM_VISION_MODEL`
+- **`src/medical/extraction.py`** — updated 3 call sites from `config.VISION_MODEL` → `config.LLM_VISION_MODEL`
+- **`src/medical/eob/extractors/__init__.py`** *(new)* — package marker
+- **`src/medical/eob/extractors/llm.py`** *(new)* — `LLMVisionExtractor`; fresh client+settings per call; `response_format=json_object`; subtype coercion; never-raises fallback
+- **`src/medical/eob/pipeline.py`** — imported `LLMVisionExtractor`; added `LLM_EXTRACTOR` module-level constant; replaced `NotImplementedError` with working `llm_override` branch
+- **`src/medical/eob/corpus.py`** *(new)* — `log_unknown(document_id, db_path)` updating `documents.notes`; open-commit-close; never-raises
+- **`tests/test_eob_llm.py`** *(new)* — 2 tests: LLM override path (mocked) + `log_unknown` DB assertion
+- **`tests/test_medical_extraction.py`** — updated settings mock key to `LLM_VISION_MODEL`
+
+#### How to verify manually
+```python
+from src.medical.eob.types import Document, PdfKind
+from src.medical.eob.pipeline import process_eob, Extracted
+
+# Build a minimal non-Anthem doc
+doc = Document(text="Generic payer EOB", words=[], page_images=[b"\x89PNG\r\n\x1a\n"], source=PdfKind.IMAGE)
+
+# With OPENROUTER_API_KEY set:
+result = process_eob(doc, llm_override=True)
+assert isinstance(result, Extracted) and result.extractor == "llm"
+print(result.eob)
+```
+
+#### Open questions / deferred decisions for Phase 4
+- **`log_unknown` wire-up**: the function exists and is tested, but the Telegram harness (Phase 5) is the caller — Phase 4 should not call it yet. Phase 5 must pass the `document_id` returned by `save_document`.
+- **OpenRouter vision model**: `LLM_VISION_MODEL` defaults to `"anthropic/claude-sonnet-4-6"`. Verify the OpenRouter endpoint accepts `response_format=json_object` for this model before Phase 5 ships.
+- **Page image memory**: for very long EOBs, `page_images` in memory may be large. The Phase 1 open question about lazy rendering remains deferred.
+- One prose reference to `VISION_MODEL` remains in `docs/roadmaps/roadmap_medical_bill_tracking.md` — cosmetic only, left untouched.
 
 ## Phase 4: Bridge persistence
 **What's true when this is done:** a confirmed `EOBDocument` writes one `eob_documents` row + one `eob_claims` row per claim (append-only) AND inserts a linked `claims`+`adjudications` row per claim (always-insert, no dedup) with `eob_claims.claim_id` populated, so `v_claim_obligation` / `/balance` reflect the EOB. Two sends of the same `claim_number` produce two of each.

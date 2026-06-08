@@ -27,7 +27,7 @@ class Settings:
     LOG_LEVEL: str
 
     # Optional (has default)
-    VISION_MODEL: str = "anthropic/claude-sonnet-4-6"
+    LLM_VISION_MODEL: str = "anthropic/claude-sonnet-4-6"
 
     @classmethod
     def load(cls) -> 'Settings':
@@ -57,7 +57,7 @@ class Settings:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
         # Optional with default
-        env_values['VISION_MODEL'] = os.getenv('VISION_MODEL', 'anthropic/claude-sonnet-4-6')
+        env_values['LLM_VISION_MODEL'] = os.getenv('LLM_VISION_MODEL', 'anthropic/claude-sonnet-4-6')
 
         settings = cls(**env_values)
         logger.info("Configuration loaded successfully")

@@ -13,6 +13,7 @@ Top-level EOB extraction pipeline: identify -> dispatch -> extract -> validate.
 import logging
 
 from src.medical.eob.anchors import identify
+from src.medical.eob.extractors.llm import LLMVisionExtractor
 from src.medical.eob.profiles import ProfileExtractor
 from src.medical.eob.profiles.anthem import ANTHEM_PROFILE
 from src.medical.eob.types import (
@@ -35,6 +36,11 @@ REGISTRY: dict[str, Extractor] = {
 }
 
 
+# Fallback extractor for documents with no recognized issuer, used only when
+# the caller opts in via process_eob(..., llm_override=True).
+LLM_EXTRACTOR: Extractor = LLMVisionExtractor()
+
+
 def process_eob(doc: Document, *, llm_override: bool = False) -> EOBResult:
     """
     Run the EOB extraction pipeline over a normalized ``Document``.
@@ -50,5 +56,6 @@ def process_eob(doc: Document, *, llm_override: bool = False) -> EOBResult:
         eob = REGISTRY[issuer].extract(doc)
         return Extracted(eob, validate(eob, doc.source), extractor=issuer)
     if llm_override:
-        raise NotImplementedError("LLM fallback deferred to Phase 3")
+        eob = LLM_EXTRACTOR.extract(doc)
+        return Extracted(eob, validate(eob, doc.source), extractor="llm")
     return UnknownType(doc)

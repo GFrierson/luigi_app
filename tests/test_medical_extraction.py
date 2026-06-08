@@ -333,7 +333,7 @@ def _mock_settings() -> MagicMock:
     return MagicMock(
         OPENROUTER_API_KEY="k",
         OPENROUTER_BASE_URL="https://x",
-        VISION_MODEL="m",
+        LLM_VISION_MODEL="m",
     )
 
 
