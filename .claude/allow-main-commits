@@ -1,0 +1,2 @@
+This file opts this repository out of the git-safety.sh main-branch commit block.
+Commits to main are intentional for this project.
