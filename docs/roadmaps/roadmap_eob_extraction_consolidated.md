@@ -332,11 +332,49 @@ print(result.eob)
 ## Phase 4: Bridge persistence
 **What's true when this is done:** a confirmed `EOBDocument` writes one `eob_documents` row + one `eob_claims` row per claim (append-only) AND inserts a linked `claims`+`adjudications` row per claim (always-insert, no dedup) with `eob_claims.claim_id` populated, so `v_claim_obligation` / `/balance` reflect the EOB. Two sends of the same `claim_number` produce two of each.
 
-- [ ] Add `eob_documents` + `eob_claims` (schema above, incl. `claim_id` and `source_document_id` FKs) to `src/database.py` `init_db()`
-- [ ] Implement `persist_eob(eob, source, extractor, source_document_id, db_path) -> int` in `src/medical/eob/persist.py`: INSERT the document row, then one `eob_claims` row per `Claim` (serialize `line_items` → JSON); return `eob_document_id`
-- [ ] Implement `bridge_eob_to_claims(eob, db_path, eob_document_id) -> list[int]` in `bridge.py`: per claim derive billed/allowed/plan_paid by summing line items + member_owed from `patient_owes`; `match_provider`→`create_provider` (Phase 7); `resolve_entity_to_practice`→`create_practice` (Phase 1); find-or-create encounter (Phase 6); `create_claim`; `adjudicate_claim`; backfill `eob_claims.claim_id`. Never match/supersede
-- [ ] Implement `get_latest_eob_claim` / `get_eob_claim_history` (join back to `eob_documents` for subtype/subscriber)
-- [ ] Write `tests/test_eob_persist.py`: multi-claim → 1 doc + N `eob_claims` + N bridged `claims`; same `claim_number` twice → two of each (no dedup); `v_claim_obligation` reflects bridged amounts; latest-per-claim returns newest; subtype/subscriber round-trip
+- [x] Add `eob_documents` + `eob_claims` (schema above, incl. `claim_id` and `source_document_id` FKs) to `src/database.py` `init_db()`
+- [x] Implement `persist_eob(eob, source, extractor, source_document_id, db_path) -> int` in `src/medical/eob/persist.py`: INSERT the document row, then one `eob_claims` row per `Claim` (serialize `line_items` → JSON); return `eob_document_id`
+- [x] Implement `bridge_eob_to_claims(eob, db_path, eob_document_id) -> list[int]` in `bridge.py`: per claim derive billed/allowed/plan_paid by summing line items + member_owed from `patient_owes`; `match_provider`→`create_provider` (Phase 7); `resolve_entity_to_practice`→`create_practice` (Phase 1); find-or-create encounter (Phase 6); `create_claim`; `adjudicate_claim`; backfill `eob_claims.claim_id`. Never match/supersede
+- [x] Implement `get_latest_eob_claim` / `get_eob_claim_history` (join back to `eob_documents` for subtype/subscriber)
+- [x] Write `tests/test_eob_persist.py`: multi-claim → 1 doc + N `eob_claims` + N bridged `claims`; same `claim_number` twice → two of each (no dedup); `v_claim_obligation` reflects bridged amounts; latest-per-claim returns newest; subtype/subscriber round-trip
+
+### Handoff — Phase 4
+**Completed:** 2026-06-11
+**Branch:** main
+**Tests:** pytest tests/ -x -q — 306 passed, 0 failed
+
+#### What was built
+`persist_eob()` in `src/medical/eob/persist.py` writes one `eob_documents` row and one `eob_claims` row per claim (line items serialized to JSON, `claim_id` left NULL). `bridge_eob_to_claims()` in `src/medical/eob/bridge.py` mirrors each EOB claim into the canonical `claims`/`adjudications` lifecycle — resolving or creating provider/placeholder-practice/encounter rows on the fly, passing `eob_document_id` to `create_claim` to break the UNIQUE key for always-insert semantics, then backfilling `eob_claims.claim_id`. Two resends of the same claim number produce two rows of each. `get_latest_eob_claim` / `get_eob_claim_history` join back to `eob_documents` for subtype/subscriber. The `claims` table was migrated via an idempotent SQLite table-rename to add `eob_document_id` and replace the inline `UNIQUE(service_date, billing_practice_id, billed_amount)` constraint with an expression index `COALESCE(eob_document_id, 0)` (expression indexes cannot live in table constraints in SQLite — this was the key blocker caught in plan review).
+
+#### Files changed
+- **`src/database.py`** — added `eob_documents`, `eob_claims` tables + `idx_eob_claim_number`; idempotent table-rename migration on `claims` adding `eob_document_id` + `uq_claims` expression index (drops/recreates dependent views during migration)
+- **`src/medical/claims.py`** — added `eob_document_id: Optional[int] = None` to `create_claim` signature, INSERT, event payload, and returning SELECT
+- **`src/medical/eob/persist.py`** *(new)* — `persist_eob`, `get_latest_eob_claim`, `get_eob_claim_history`
+- **`src/medical/eob/bridge.py`** *(new)* — `bridge_eob_to_claims`, `_backfill_eob_claim_id`, `_derive_service_date`
+- **`src/medical/eob/__init__.py`** — exported four new public functions
+- **`tests/test_eob_persist.py`** *(new)* — 13 tests
+
+#### How to verify manually
+```python
+from src.database import init_db
+from src.medical.eob.types import EOBDocument, Claim, LineItem, PdfKind
+from src.medical.eob.persist import persist_eob, get_latest_eob_claim
+from src.medical.eob.bridge import bridge_eob_to_claims
+
+init_db("/tmp/test_phase4.db")
+li = LineItem("2025-10-01","99213","","250.00","50.00","200.00","160.00","20.00","0.00","20.00","0.00","40.00")
+eob = EOBDocument("anthem","summary","Jane Doe",[Claim("Jane Doe","CLM001","2025-10-05","Dr. Smith",True,"40.00",[li])])
+doc_id = persist_eob(eob, PdfKind.IMAGE, "anthem", None, "/tmp/test_phase4.db")
+claim_ids = bridge_eob_to_claims(eob, "/tmp/test_phase4.db", doc_id)
+print(claim_ids)  # [1]
+row = get_latest_eob_claim("/tmp/test_phase4.db", "CLM001")
+print(row["subtype"], row["claim_id"])  # summary  1
+```
+
+#### Open questions / deferred decisions for Phase 5
+- **`log_unknown` caller**: `log_unknown(document_id, db_path)` in `corpus.py` exists and is tested, but Phase 5 (Telegram harness) is the intended caller. Phase 5 must pass the `document_id` returned by `save_document`.
+- **`resolve_entity_to_practice` always misses for new users**: the placeholder-practice fallback creates a practice row named after the rendering doctor. This is correct for now but means every new Anthem EOB for a new user creates a new practice entry. Phase 5 may want a UX note for duplicate practice cleanup.
+- **`eob_document_id` disambiguates two resends with identical amounts**: a third resend (same `eob_document_id`... no, each persist call creates a new `eob_document_id`) — each `persist_eob` call creates a unique `eob_document_id`, so N resends produce N distinct UNIQUE index values. This is correct.
 
 ## Phase 5: Telegram vertical slice
 **What's true when this is done:** a user sends an Anthem PDF → subtype-aware confirm listing each claim + artifact flags → on confirm, claims save via the bridge and show in `/balance`; an unknown EOB triggers the consent prompt; a declined/non-Anthem PDF falls through to the existing `ingest_document` pipeline; photos use the existing photo path.

@@ -292,7 +292,7 @@ def init_db(db_path: str) -> None:
             billed_amount REAL NOT NULL,
             current_status TEXT NOT NULL DEFAULT 'submitted'
                 CHECK (current_status IN ('submitted','adjudicated','readjudicated','denied','void')),
-            UNIQUE(service_date, billing_practice_id, billed_amount)
+            eob_document_id INTEGER REFERENCES eob_documents(id)
         )
     """)
 
@@ -393,6 +393,86 @@ def init_db(db_path: str) -> None:
             UNIQUE(payment_id, claim_id)
         )
     """)
+
+    # --- EOB persistence (Phase 4) ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS eob_documents (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            issuer             TEXT NOT NULL,
+            subtype            TEXT NOT NULL,
+            subscriber         TEXT,
+            source             TEXT NOT NULL,
+            extractor          TEXT NOT NULL,
+            source_document_id INTEGER REFERENCES documents(id),
+            processed_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS eob_claims (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id     INTEGER NOT NULL REFERENCES eob_documents(id),
+            claim_id        INTEGER REFERENCES claims(id),
+            claim_number    TEXT NOT NULL,
+            patient         TEXT,
+            provider        TEXT,
+            in_network      BOOLEAN,
+            received_date   DATE,
+            patient_owes    TEXT,
+            line_items_json TEXT
+        )
+    """)
+
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eob_claim_number ON eob_claims(claim_number)"
+    )
+
+    # --- Phase 4 migration: add eob_document_id to claims, drop inline UNIQUE ---
+    # The EOB bridge is always-insert (no dedup). The original claims table had an
+    # inline UNIQUE(service_date, billing_practice_id, billed_amount) constraint
+    # which would collide when the same claim is resent. We rename the table to
+    # add an eob_document_id column and replace the inline UNIQUE with an
+    # expression index that includes COALESCE(eob_document_id, 0) — which cannot
+    # live inside a table constraint in SQLite, hence the separate index.
+    cursor.execute("PRAGMA table_info(claims)")
+    claims_columns = {row["name"] for row in cursor.fetchall()}
+    if "eob_document_id" not in claims_columns:
+        logger.info("Migrating claims table: adding eob_document_id column")
+        # Views below depend on claims; drop them before the table rebuild so the
+        # DROP TABLE succeeds. They are unconditionally recreated later in init_db().
+        cursor.execute("DROP VIEW IF EXISTS v_encounter_balance")
+        cursor.execute("DROP VIEW IF EXISTS v_member_holds")
+        cursor.execute("DROP VIEW IF EXISTS v_claim_obligation")
+        cursor.execute("PRAGMA foreign_keys = OFF")
+        cursor.execute("""
+            CREATE TABLE claims_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service_date DATE NOT NULL,
+                billing_practice_id INTEGER NOT NULL REFERENCES practices(id),
+                encounter_id INTEGER REFERENCES encounters(id),
+                insurer_id INTEGER REFERENCES insurers(id),
+                billed_amount REAL NOT NULL,
+                current_status TEXT NOT NULL DEFAULT 'submitted'
+                    CHECK (current_status IN ('submitted','adjudicated','readjudicated','denied','void')),
+                eob_document_id INTEGER REFERENCES eob_documents(id)
+            )
+        """)
+        cursor.execute("""
+            INSERT INTO claims_new
+                (id, service_date, billing_practice_id, encounter_id,
+                 insurer_id, billed_amount, current_status)
+            SELECT id, service_date, billing_practice_id, encounter_id,
+                   insurer_id, billed_amount, current_status
+            FROM claims
+        """)
+        cursor.execute("DROP TABLE claims")
+        cursor.execute("ALTER TABLE claims_new RENAME TO claims")
+        cursor.execute("PRAGMA foreign_keys = ON")
+
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_claims "
+        "ON claims(service_date, billing_practice_id, billed_amount, COALESCE(eob_document_id, 0))"
+    )
 
     # --- Medical billing views (Phase 3, extended in Phase 5) ---
     # NOTE: each view uses DROP + CREATE (no IF NOT EXISTS on the CREATE) so that

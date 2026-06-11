@@ -68,6 +68,7 @@ def create_claim(
     billed_amount: float,
     encounter_id: Optional[int] = None,
     insurer_id: Optional[int] = None,
+    eob_document_id: Optional[int] = None,
 ) -> Optional[dict]:
     """
     Insert a new claim. Returns the created row dict, or None on duplicate
@@ -79,10 +80,12 @@ def create_claim(
         cursor.execute(
             """
             INSERT INTO claims
-                (service_date, billing_practice_id, encounter_id, insurer_id, billed_amount)
-            VALUES (?, ?, ?, ?, ?)
+                (service_date, billing_practice_id, encounter_id, insurer_id,
+                 billed_amount, eob_document_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (service_date, billing_practice_id, encounter_id, insurer_id, billed_amount),
+            (service_date, billing_practice_id, encounter_id, insurer_id,
+             billed_amount, eob_document_id),
         )
         claim_id = cursor.lastrowid
 
@@ -92,6 +95,7 @@ def create_claim(
             "encounter_id": encounter_id,
             "insurer_id": insurer_id,
             "billed_amount": billed_amount,
+            "eob_document_id": eob_document_id,
         })
         _append_event(cursor, claim_id, "created", payload)
 
@@ -100,7 +104,7 @@ def create_claim(
         cursor.execute(
             """
             SELECT id, service_date, billing_practice_id, encounter_id,
-                   insurer_id, billed_amount, current_status
+                   insurer_id, billed_amount, current_status, eob_document_id
             FROM claims
             WHERE id = ?
             """,
