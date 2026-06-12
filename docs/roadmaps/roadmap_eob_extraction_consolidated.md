@@ -379,12 +379,38 @@ print(row["subtype"], row["claim_id"])  # summary  1
 ## Phase 5: Telegram vertical slice
 **What's true when this is done:** a user sends an Anthem PDF → subtype-aware confirm listing each claim + artifact flags → on confirm, claims save via the bridge and show in `/balance`; an unknown EOB triggers the consent prompt; a declined/non-Anthem PDF falls through to the existing `ingest_document` pipeline; photos use the existing photo path.
 
-- [ ] In `telegram_handler.py` `_on_document`: for PDFs run `await asyncio.to_thread(to_document, bytes)` → `detect_artifacts` → `process_eob`; branch on `EOBResult`
-- [ ] Implement the subtype-aware confirm: render the `EOBDocument` ("$558.31 deposited to you" vs "denied — may owe $1,469.68 pending info" vs "you owe $X across N claims"), list each claim, surface artifact flags; reuse the existing pending-confirmation state + reply-parser; low confidence → ask resend
-- [ ] On `confirm`: `save_document` the PDF → `persist_eob` → `bridge_eob_to_claims` (wrapped in `asyncio.to_thread`)
-- [ ] Implement the `UnknownType` consent round-trip: prompt "Unknown EOB — use AI vision?"; yes → `process_eob(doc, llm_override=True)` → `log_unknown` → confirm; no → hand off to the existing `ingest_document` flow
-- [ ] Route `Unreadable` / declined / non-EOB results to the existing `ingest_document` pipeline so bills/statements/receipts/photos/albums are unaffected
-- [ ] Write `tests/test_eob_telegram.py`: PDF→extract→confirm-yes→persist+bridge (multi-claim, appears in `/balance`); unknown→consent→llm→persist; decline→falls through to `ingest_document`; artifact flag surfaced (mocked transport)
+- [x] In `telegram_handler.py` `_on_document`: for PDFs run `await asyncio.to_thread(to_document, bytes)` → `detect_artifacts` → `process_eob`; branch on `EOBResult`
+- [x] Implement the subtype-aware confirm: render the `EOBDocument` ("$558.31 deposited to you" vs "denied — may owe $1,469.68 pending info" vs "you owe $X across N claims"), list each claim, surface artifact flags; reuse the existing pending-confirmation state + reply-parser; low confidence → ask resend
+- [x] On `confirm`: `save_document` the PDF → `persist_eob` → `bridge_eob_to_claims` (wrapped in `asyncio.to_thread`)
+- [x] Implement the `UnknownType` consent round-trip: prompt "Unknown EOB — use AI vision?"; yes → `process_eob(doc, llm_override=True)` → `log_unknown` → confirm; no → hand off to the existing `ingest_document` flow
+- [x] Route `Unreadable` / declined / non-EOB results to the existing `ingest_document` pipeline so bills/statements/receipts/photos/albums are unaffected
+- [x] Write `tests/test_eob_telegram.py`: PDF→extract→confirm-yes→persist+bridge (multi-claim, appears in `/balance`); unknown→consent→llm→persist; decline→falls through to `ingest_document`; artifact flag surfaced (mocked transport)
+
+### Handoff — Phase 5
+**Completed:** 2026-06-12
+**Branch:** main
+**Tests:** pytest tests/ -x -q — 316 passed, 0 failed
+
+#### What was built
+The Telegram vertical slice is complete: `src/medical/eob/ingestion.py` owns the three public functions — `_format_eob_confirm` (pure, subtype-aware confirm text), `_format_consent_prompt` (pure, unknown-issuer consent prompt), and async `commit_eob_ingestion` (save_document → persist_eob → optional log_unknown → bridge_eob_to_claims, all via `asyncio.to_thread`, never raises). `_on_document` in `telegram_handler.py` now intercepts PDFs through a `_try_handle_eob_document` helper before falling through to `ingest_document`: a recognized Anthem EOB produces a confirm prompt with per-claim bullets and artifact flags; an unknown issuer triggers the AI-vision consent round-trip; low-confidence or unreadable PDFs and non-PDFs fall through cleanly. `_on_message` routes `kind="eob"` (confirm/cancel) and `kind="eob_consent"` (yes/no) before calling `parse_confirmation_reply`, so "yes"/"confirm" are never misrouted. TTL expiry is scheduled for both EOB pending states using the shared `_expire_confirmation` callback. 10 new tests cover all branches.
+
+#### Files changed
+- **`src/medical/eob/ingestion.py`** *(new)* — `_format_eob_confirm`, `_format_consent_prompt`, `commit_eob_ingestion`
+- **`src/medical/eob/__init__.py`** — exported three new public functions
+- **`src/telegram_handler.py`** — added EOB imports; `_schedule_eob_ttl` + `_try_handle_eob_document` helpers; EOB fast path in `_on_document`; `kind="eob"` and `kind="eob_consent"` routing in `_on_message`
+- **`tests/test_eob_telegram.py`** *(new)* — 10 scenarios (confirm, cancel, consent yes/no, artifact, Unreadable, NotAPdf, low-confidence)
+
+#### How to verify manually
+1. Run the bot locally with `OPENROUTER_API_KEY` set and `tesseract` installed.
+2. Send an Anthem EOB PDF → confirm prompt lists each claim with provider/date/owe amounts → reply `confirm` → `/balance` reflects bridged claims.
+3. Send a non-Anthem PDF → consent prompt → reply `no` → document falls through to regular ingestion flow.
+4. Send a non-Anthem PDF → consent prompt → reply `yes` → LLM vision extracts the EOB → confirm prompt shows AI-extracted claims → reply `confirm` → saved with `unknown_consented=True` (documents.notes flagged for future profile authoring).
+5. Send a photo → unchanged `_on_photo` path, no EOB code touched.
+
+#### Open questions / deferred decisions
+- **UnknownType consent fires on any unrecognized PDF (e.g. a bill)**: the decline path correctly hands off to `ingest_document`, so no data is lost, but a heuristic EOB-vs-bill gate remains deferred per the roadmap's Blockers section.
+- **`eob`/`eob_consent` TTL timeout message**: uses the generic "document confirmation timed out" notice from `_expire_confirmation`; an EOB-specific message was not in scope.
+- **Eval task (Phase 2) still open**: `experiments/medical/anthm_eob/annotations.csv` needs N≥15 annotated samples before the ≥90% precision gate can be cleared and wired into `run_all_extractor_evals.py`.
 
 ---
 

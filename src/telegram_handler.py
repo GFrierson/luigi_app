@@ -27,6 +27,19 @@ from src.medical.ingestion import (
     _pending_confirmations,
 )
 from src.medical.confirmation import parse_confirmation_reply
+from src.medical.ingestion import (
+    _CONFIRMATION_TTL_SECONDS,
+    _expire_confirmation,
+)
+from src.medical.eob.artifacts import detect_artifacts
+from src.medical.eob.document import NotAPdf, to_document
+from src.medical.eob.ingestion import (
+    _format_consent_prompt,
+    _format_eob_confirm,
+    commit_eob_ingestion,
+)
+from src.medical.eob.pipeline import process_eob
+from src.medical.eob.types import Extracted, Unreadable, UnknownType
 from src.medical.queries import (
     get_global_obligations,
     get_member_holds_overdue,
@@ -477,6 +490,103 @@ async def readjudications_command(update: Update, context) -> None:
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # Telegram Bot API limit
 
 
+def _schedule_eob_ttl(context, chat_id: int) -> None:
+    """Schedule the shared confirmation-TTL expiry job for an EOB pending state."""
+    try:
+        if context is not None and getattr(context, "job_queue", None) is not None:
+            context.job_queue.run_once(
+                _expire_confirmation,
+                _CONFIRMATION_TTL_SECONDS,
+                data=chat_id,
+            )
+    except Exception:
+        logger.error(
+            f"_schedule_eob_ttl: failed to schedule TTL expiry for chat {chat_id}",
+            exc_info=True,
+        )
+
+
+async def _try_handle_eob_document(
+    chat_id: int,
+    file_bytes: bytes,
+    file_name: str,
+    mime_type: str,
+    context,
+) -> bool:
+    """
+    Attempt the EOB extraction path for a PDF document.
+
+    Returns True if the EOB path consumed the message (a confirm/consent prompt
+    was sent, or a low-confidence resend notice). Returns False to fall through
+    to the existing ``ingest_document`` pipeline (non-PDF, Unreadable, or error).
+    """
+    is_pdf = (mime_type or "").lower() == "application/pdf" or (
+        file_name or ""
+    ).lower().endswith(".pdf")
+    if not is_pdf:
+        return False
+
+    try:
+        eob_doc_obj = await asyncio.to_thread(to_document, file_bytes)
+        artifacts = detect_artifacts(eob_doc_obj)
+        eob_result = await asyncio.to_thread(process_eob, eob_doc_obj)
+
+        if isinstance(eob_result, Unreadable):
+            return False
+
+        if isinstance(eob_result, Extracted):
+            if not eob_result.validation.ok:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "I couldn't read this EOB confidently — please try "
+                        "re-sending a clearer scan."
+                    ),
+                )
+                return True
+            message = _format_eob_confirm(
+                eob_result.eob, artifacts, eob_result.validation
+            )
+            _pending_confirmations[chat_id] = {
+                "kind": "eob",
+                "result": eob_result,
+                "artifacts": artifacts,
+                "source": eob_doc_obj.source,
+                "file_bytes": file_bytes,
+                "original_name": file_name,
+                "mime_type": mime_type,
+                "unknown_consented": False,
+            }
+            _schedule_eob_ttl(context, chat_id)
+            await context.bot.send_message(chat_id=chat_id, text=message)
+            return True
+
+        if isinstance(eob_result, UnknownType):
+            message = _format_consent_prompt(eob_result.doc)
+            _pending_confirmations[chat_id] = {
+                "kind": "eob_consent",
+                "doc": eob_result.doc,
+                "artifacts": artifacts,
+                "file_bytes": file_bytes,
+                "original_name": file_name,
+                "mime_type": mime_type,
+            }
+            _schedule_eob_ttl(context, chat_id)
+            await context.bot.send_message(chat_id=chat_id, text=message)
+            return True
+
+        return False
+    except NotAPdf:
+        return False
+    except Exception:
+        logger.error(
+            f"_try_handle_eob_document: EOB path failed for chat {chat_id}; "
+            f"falling through to ingest_document",
+            exc_info=True,
+        )
+        return False
+
+
 async def _on_document(update: Update, context) -> None:
     """Handler for incoming Telegram document messages (PDF, etc.)."""
     if not update.message or not update.message.document:
@@ -514,13 +624,25 @@ async def _on_document(update: Update, context) -> None:
         )
         return
 
+    file_name = doc.file_name or "document"
+    mime_type = doc.mime_type or "application/octet-stream"
+
+    # EOB fast path: PDFs are routed through the deterministic EOB engine first.
+    # Returns True if it consumed the message (confirm/consent/resend), else we
+    # fall through to the generic ingestion pipeline below.
+    consumed = await _try_handle_eob_document(
+        chat_id, file_bytes, file_name, mime_type, context
+    )
+    if consumed:
+        return
+
     result = await ingest_document(
         db_path,
         config.DOCUMENTS_DIR,
         chat_id,
         file_bytes,
-        doc.file_name or "document",
-        doc.mime_type or "application/octet-stream",
+        file_name,
+        mime_type,
         context,
     )
     await context.bot.send_message(chat_id=chat_id, text=result)
@@ -600,7 +722,95 @@ async def _on_message(update: Update, context) -> None:
     if chat_id in _pending_confirmations:
         config = get_settings()
         db_path = get_user_db_path(config.DATABASE_DIR, chat_id)
+        documents_dir = config.DOCUMENTS_DIR
         pending = _pending_confirmations[chat_id]
+
+        # EOB confirm flow: route yes/confirm/cancel BEFORE the generic
+        # confirmation parser so "yes"/"no" are not misrouted.
+        kind = pending.get("kind")
+        if kind == "eob":
+            lower = text.strip().lower()
+            if lower in {"yes", "y", "confirm", "ok", "okay"}:
+                _pending_confirmations.pop(chat_id, None)
+                await commit_eob_ingestion(db_path, documents_dir, chat_id, pending)
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text="EOB saved.")
+                except Exception:
+                    logger.error(
+                        f"_on_message: failed to send 'EOB saved.' to chat {chat_id}",
+                        exc_info=True,
+                    )
+            elif lower in {"cancel", "no", "discard"}:
+                _pending_confirmations.pop(chat_id, None)
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text="Cancelled.")
+                except Exception:
+                    logger.error(
+                        f"_on_message: failed to send 'Cancelled.' to chat {chat_id}",
+                        exc_info=True,
+                    )
+            # anything else: leave the pending state in place, consume the reply
+            return
+
+        if kind == "eob_consent":
+            lower = text.strip().lower()
+            if lower in {"yes", "y"}:
+                _pending_confirmations.pop(chat_id, None)
+                try:
+                    eob_result_llm = await asyncio.to_thread(
+                        lambda: process_eob(pending["doc"], llm_override=True)
+                    )
+                    if isinstance(eob_result_llm, Extracted):
+                        msg = _format_eob_confirm(
+                            eob_result_llm.eob,
+                            pending.get("artifacts", []),
+                            eob_result_llm.validation,
+                        )
+                        _pending_confirmations[chat_id] = {
+                            "kind": "eob",
+                            "result": eob_result_llm,
+                            "artifacts": pending.get("artifacts", []),
+                            "source": pending["doc"].source,
+                            "file_bytes": pending["file_bytes"],
+                            "original_name": pending["original_name"],
+                            "mime_type": pending["mime_type"],
+                            "unknown_consented": True,
+                        }
+                        _schedule_eob_ttl(context, chat_id)
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                    else:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                "AI couldn't read that document. I'll process it "
+                                "as a regular document."
+                            ),
+                        )
+                except Exception:
+                    logger.error(
+                        f"_on_message: LLM consent path failed for chat {chat_id}",
+                        exc_info=True,
+                    )
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="Something went wrong. Please re-send the document.",
+                    )
+            elif lower in {"no", "cancel"}:
+                _pending_confirmations.pop(chat_id, None)
+                # Re-ingest as a regular document — file_bytes was kept in pending.
+                result = await ingest_document(
+                    db_path,
+                    documents_dir,
+                    chat_id,
+                    pending["file_bytes"],
+                    pending["original_name"],
+                    pending["mime_type"],
+                    context,
+                )
+                await context.bot.send_message(chat_id=chat_id, text=result)
+            # anything else: leave the pending state in place, consume the reply
+            return
+
         result = parse_confirmation_reply(text, pending.get("pending_items", []))
         action = result.get("action")
         if action == "confirm":
