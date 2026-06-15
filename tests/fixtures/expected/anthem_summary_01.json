@@ -1,0 +1,61 @@
+{
+  "fixture": "anthem_summary_01",
+  "insurer": "anthem",
+  "kind": "text",
+  "subtype": "summary",
+  "eob": {
+    "issuer": "anthem",
+    "subtype": "summary",
+    "subscriber": "JANE DOE",
+    "claims": [
+      {
+        "patient": "JANE DOE",
+        "claim_number": "2026A0010001",
+        "received_date": "2026-05-12",
+        "provider": "RIVERSIDE FAMILY MEDICINE",
+        "in_network": true,
+        "patient_owes": "$25.00",
+        "line_items": [
+          {
+            "service_date": "2026-05-01",
+            "service": "Office Visit",
+            "reason_code": "ADU",
+            "doctor_charges": "$180.00",
+            "discounts": "$60.00",
+            "allowed": "$120.00",
+            "anthem_paid": "$95.00",
+            "copay": "$25.00",
+            "deductible": "$0.00",
+            "coinsurance": "$0.00",
+            "not_covered": "$0.00",
+            "your_total": "$25.00"
+          }
+        ]
+      },
+      {
+        "patient": "SAM DOE",
+        "claim_number": "2026A0010002",
+        "received_date": "2026-05-14",
+        "provider": "RIVERSIDE LAB SERVICES",
+        "in_network": true,
+        "patient_owes": "$0.00",
+        "line_items": [
+          {
+            "service_date": "2026-05-03",
+            "service": "Lab Panel",
+            "reason_code": "033",
+            "doctor_charges": "$90.00",
+            "discounts": "$40.00",
+            "allowed": "$50.00",
+            "anthem_paid": "$50.00",
+            "copay": "$0.00",
+            "deductible": "$0.00",
+            "coinsurance": "$0.00",
+            "not_covered": "$0.00",
+            "your_total": "$0.00"
+          }
+        ]
+      }
+    ]
+  }
+}

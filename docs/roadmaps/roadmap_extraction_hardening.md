@@ -62,12 +62,12 @@ To trace the grounding path end-to-end: run `process_eob(doc, llm_override=True)
 
 **Done when:** running the harness over the fixture corpus produces a results table you can `groupby` to see exactly which (insurer, kind, subtype, column) combinations fail, and the insurer-cutover decision reads from it.
 
-- [ ] Author labeled expectations per fixture (the expected `EOBDocument`) under `tests/fixtures/expected/`
-- [ ] Build `src/eob/eval/harness.py`: run `to_document → process_eob` over each labeled fixture, diff extracted vs expected **per field**
-- [ ] Create the `eval_results` store (schema below) in `src/eob/eval/store.py` — one row per (fixture, claim, field), tagged with the failure-mode dimensions
-- [ ] Implement per-failure-mode reporting: `pandas.groupby` over the dims → accuracy per (insurer × kind), per column, per subtype; surface the worst buckets, never a single aggregate
-- [ ] Wire the runbook **cutover gate** to read from `eval_results`: a new insurer profile leaves LLM-fallback only when its buckets pass thresholds (deterministic output vs the logged `log_unknown` LLM records)
-- [ ] Add a CLI entry to run the eval over the corpus on demand
+- [x] Author labeled expectations per fixture (the expected `EOBDocument`) under `tests/fixtures/expected/`
+- [x] Build `src/eob/eval/harness.py`: run `to_document → process_eob` over each labeled fixture, diff extracted vs expected **per field**
+- [x] Create the `eval_results` store (schema below) in `src/eob/eval/store.py` — one row per (fixture, claim, field), tagged with the failure-mode dimensions
+- [x] Implement per-failure-mode reporting: `pandas.groupby` over the dims → accuracy per (insurer × kind), per column, per subtype; surface the worst buckets, never a single aggregate
+- [x] Wire the runbook **cutover gate** to read from `eval_results`: a new insurer profile leaves LLM-fallback only when its buckets pass thresholds (deterministic output vs the logged `log_unknown` LLM records)
+- [x] Add a CLI entry to run the eval over the corpus on demand
 
 ```sql
 -- src/eob/eval/store.py — one row per (fixture, claim, field); reports are groupby over this
@@ -87,6 +87,48 @@ CREATE TABLE eval_results (
     ts         DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+### Handoff — Workstream B
+**Completed:** 2026-06-15
+**Branch:** main
+**Tests:** pytest tests/ -x -q → 335 passed (322 prior + 13 new)
+
+#### What was built
+A standalone per-failure-mode eval harness (`src/medical/eob/eval/`) that runs `to_document → process_eob` over labeled fixture expectations, diffs each extracted `EOBDocument` against the expectation one row per field (outcome: `match | miss | mismatch | ungrounded`), persists results to SQLite, and exposes `pandas.groupby` reporting over `(insurer × kind × subtype × field)` dimensions. The cutover gate in `docs/playbook/adding_an_insurer.md` now reads from this table. A CLI entry point (`python -m src.medical.eob.eval.cli`) runs the eval on demand.
+
+#### Files changed
+- `src/medical/eob/eval/__init__.py` — empty package marker
+- `src/medical/eob/eval/store.py` — `init_eval_db` / `insert_eval_row` / `get_eval_results`; open-commit-close, never-raise, parameterized inserts
+- `src/medical/eob/eval/diff.py` — pure `diff_eob`; field enumeration (`doc_banner`, `header`, `claim_banner`, `claim_table`), outcome priority `ungrounded > miss > mismatch > match`, claim/line-item-count mismatch handled without IndexError, `None`/`""` normalization for `received_date`
+- `src/medical/eob/eval/expectations.py` — `load_expectation` / `eob_from_dict`; never-raise JSON→`EOBDocument` deserializer
+- `src/medical/eob/eval/harness.py` — `run_harness`; catches all `to_document` exceptions per fixture (emits miss rows per expected field, not a crash); parses ungrounded field paths from `validation.issues` strings (GroundingReport is not exposed by `process_eob`); emits one miss row per expected field on total failures
+- `src/medical/eob/eval/report.py` — `load_results`, `accuracy_by_insurer_kind`, `accuracy_by_column`, `accuracy_by_subtype`, `worst_buckets`; all sorted worst-first
+- `src/medical/eob/eval/cli.py` — argparse CLI (`--fixture-dir`, `--expected-dir`, `--eval-db`, `--run-id`, `--llm`, `--report`)
+- `tests/fixtures/expected/anthem_summary_01.json` — synthetic multi-claim Anthem summary expectation
+- `tests/fixtures/expected/cigna_denial_01.json` — synthetic Cigna denial expectation with null `received_date`
+- `tests/test_eob_eval.py` — 13 tests: store idempotency, insert/fetch round-trip, run_id filter, diff match/mismatch/miss/ungrounded/claim-count-mismatch, harness mock-run, NotAPdf total failure, Unreadable path, accuracy groupby, worst_buckets sort order
+- `requirements.txt` — added `pandas>=2.0.0`
+- `docs/playbook/adding_an_insurer.md` — new "Cutover gate" section referencing the eval CLI; 0.90 threshold marked as placeholder pending empirical calibration
+
+#### How to verify manually
+```bash
+pytest tests/test_eob_eval.py -q          # 13 passed
+pytest tests/ -x -q                        # 335 passed
+
+# Run the CLI (needs fixture PDFs under tests/fixtures/ for non-failure rows)
+python -m src.medical.eob.eval.cli \
+  --fixture-dir tests/fixtures \
+  --expected-dir tests/fixtures/expected \
+  --eval-db /tmp/eval.db \
+  --report worst
+```
+
+#### Open questions / deferred decisions
+- **Cutover threshold (0.90):** explicitly a placeholder. The roadmap lists this as an open blocker; calibrate empirically against a representative fixture corpus before using the gate in production.
+- **`in_network` boolean false-positive match:** if a claim exists with `in_network=False` in both expected and actual, it diffs as "match" regardless of whether it was genuinely extracted. If this field matters for the cutover gate, consider making it `Optional[bool]` or adding special-casing in `diff._classify`.
+- **`_empty_eob()` subtype sentinel:** total-failure rows use `subtype=""` (off-Literal sentinel) so the `subtype` field diffs as "miss" rather than a spurious "match". If a strict `EOBSubtype` runtime guard is ever added, this line needs a real sentinel.
+- **CLI `--llm` flag and CI:** the `--llm` flag calls the real LLM path over the corpus; it is intentionally absent from the test suite (all LLM calls are mocked per testing rules). Gate it out of CI if the corpus grows large.
+- **Fixture PDFs:** only synthetic JSON expectations exist. Real (sanitized) fixture PDFs must be added to `tests/fixtures/` before accuracy metrics become meaningful.
 
 ## Workstream C — Adaptive table parsing (representation levels + local escalation)
 *Touchpoint: main roadmap Phase 2 `parse_table`. "Don't flatten the grid" + adaptive parsing: cheap parse first, escalate only the tables that fail a diagnostic to a stronger local engine, record which method parsed each table.*

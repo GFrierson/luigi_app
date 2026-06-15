@@ -19,3 +19,5 @@ pymupdf>=1.24.0
 # pytesseract: OCR wrapper for image PDFs.
 # Requires the Tesseract system binary: apt: tesseract-ocr / brew: tesseract
 pytesseract>=0.3.10
+# pandas: per-failure-mode eval reporting (groupby over the eval_results table).
+pandas>=2.0.0

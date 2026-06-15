@@ -1,0 +1,37 @@
+{
+  "fixture": "cigna_denial_01",
+  "insurer": "cigna",
+  "kind": "image",
+  "subtype": "denial",
+  "eob": {
+    "issuer": "cigna",
+    "subtype": "denial",
+    "subscriber": "ROBERT SMITH",
+    "claims": [
+      {
+        "patient": "ROBERT SMITH",
+        "claim_number": "C2026D5500077",
+        "received_date": null,
+        "provider": "LAKESIDE ORTHOPEDICS",
+        "in_network": false,
+        "patient_owes": "$0.00",
+        "line_items": [
+          {
+            "service_date": "2026-04-18",
+            "service": "MRI Knee",
+            "reason_code": "015",
+            "doctor_charges": "$1,250.00",
+            "discounts": "$0.00",
+            "allowed": "$0.00",
+            "anthem_paid": "$0.00",
+            "copay": "$0.00",
+            "deductible": "$0.00",
+            "coinsurance": "$0.00",
+            "not_covered": "$1,250.00",
+            "your_total": "$0.00"
+          }
+        ]
+      }
+    ]
+  }
+}

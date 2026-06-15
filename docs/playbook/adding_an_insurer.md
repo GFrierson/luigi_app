@@ -37,6 +37,37 @@ REGISTRY["xxx"] = ProfileExtractor(XXX_PROFILE)
 - [ ] Mirror the Anthem test set against the new fixtures (classify kind, segment finds N claims, parse_table columns + multi-page stitch, subtype, claim counts, subscriber≠patient, validate reconciliation); commit the corpus samples to `tests/fixtures/`
 - [ ] **Validation gate / cutover:** run the new profile across the whole corpus and diff its output against the LLM-extracted records already in `log_unknown`. Cut over from LLM-fallback to deterministic only when they match and `validate` reconciles. The corpus is your labeled regression set — that's why the LLM path logs it
 
+## Cutover gate (eval harness)
+
+Before promoting an insurer from the LLM fallback to its deterministic profile,
+run the per-failure-mode eval harness and read its worst buckets — never a single
+aggregate accuracy. The harness diffs each labeled fixture's extraction against
+its `tests/fixtures/expected/<fixture>.json` expectation, one row per field, and
+writes the `eval_results` table you group by.
+
+```bash
+python -m src.medical.eob.eval.cli \
+  --fixture-dir tests/fixtures \
+  --expected-dir tests/fixtures/expected \
+  --eval-db /tmp/eval.db \
+  --report worst
+```
+
+`worst_buckets()` returns the lowest-accuracy (insurer × kind × subtype × field)
+combinations. Cut over only when every bucket for the new insurer clears the
+threshold.
+
+> **Threshold is a placeholder.** The current gate uses **0.90** match-rate per
+> bucket, but this number is **not yet empirically calibrated** against the
+> fixture corpus — it is a roadmap open blocker ("Confidence/score thresholds for
+> the cutover gate set empirically against the fixture corpus"). Treat 0.90 as a
+> starting point and recalibrate once the corpus is large enough to be
+> representative; do not gate a production cutover on it blindly.
+
+The `worst`, `by-insurer`, `by-column`, and `by-subtype` reports are all read off
+the same `eval_results` table — pick the dimension that explains the failures
+(e.g. `by-column` to see if one field is dragging the bucket down).
+
 ## Do NOT change
 `segment`, `parse_table`, `ProfileExtractor`, `process_eob`, persistence, the Telegram harness. If a new insurer makes you want to, that's a signal it breaks a shared assumption (usually claim-grouping) — escalate to a design pass and add a profile-level strategy rather than editing the engine.
 
