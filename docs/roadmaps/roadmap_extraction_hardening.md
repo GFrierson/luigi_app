@@ -16,18 +16,46 @@
 
 **Done when:** the vision fallback emits only values it can point to on the page, each value carries a page citation, and any ungrounded value is flagged before it reaches the user.
 
-- [ ] Rewrite the vision-fallback prompt as **grounded extraction**: transcribe only values visible on the page into the `EOBDocument` schema; never infer or complete a missing value
-- [ ] Have the model return, per field, the `page` it came from (and a short verbatim `span`); missing data → `found: false, value: null`, not a guess
-- [ ] Add a post-extraction **grounding check**: verify each returned value actually appears in `Document.words` on its cited page; values not found on-page are marked ungrounded
-- [ ] Constrain parametric use: arithmetic only over cited values (e.g. totals reconciliation), no prose composition — the extractor returns `EOBDocument` only
-- [ ] Feed grounding failures into `validate()` confidence (ungrounded value → low confidence → resend/confirm)
-- [ ] Tests: a genuinely-absent field → `null`/`found:false` (no hallucination); an off-page value → flagged ungrounded by the check
+- [x] Rewrite the vision-fallback prompt as **grounded extraction**: transcribe only values visible on the page into the `EOBDocument` schema; never infer or complete a missing value
+- [x] Have the model return, per field, the `page` it came from (and a short verbatim `span`); missing data → `found: false, value: null`, not a guess
+- [x] Add a post-extraction **grounding check**: verify each returned value actually appears in `Document.words` on its cited page; values not found on-page are marked ungrounded
+- [x] Constrain parametric use: arithmetic only over cited values (e.g. totals reconciliation), no prose composition — the extractor returns `EOBDocument` only
+- [x] Feed grounding failures into `validate()` confidence (ungrounded value → low confidence → resend/confirm)
+- [x] Tests: a genuinely-absent field → `null`/`found:false` (no hallucination); an off-page value → flagged ungrounded by the check
 
 ```python
 # grounded field shape returned by the LLM fallback — value + provenance, never invented
 { "field": "anthem_paid", "value": "207.20", "page": 3, "span": "207.20", "found": true }
 # post-check: assert value's tokens ∈ Document.words[page]; else outcome = "ungrounded"
 ```
+
+### Handoff — Workstream A
+**Completed:** 2026-06-15
+**Branch:** main
+**Tests:** pytest tests/ -x -q → 322 passed
+
+#### What was built
+The LLM vision fallback now requests a grounded JSON envelope where every leaf field carries provenance (`value`, `page`, `span`, `found`), normalizes it through `_unwrap_envelope` back to the existing `EOBDocument` shape (keeping all downstream consumers unchanged), and runs `check_grounding` to verify each cited span's tokens exist in `Document.words` on the cited page. Ungrounded fields flow into `validate()` as confidence-penalizing issues, so a hallucinated or off-page value reduces the extraction's confidence score and surfaces in `ValidationResult.issues`.
+
+#### Files changed
+- `src/medical/eob/types.py` — Added `GroundedField`, `GroundingReport` frozen dataclasses; added `GroundedExtractor` Protocol (left `Extractor` unchanged for deterministic paths)
+- `src/medical/eob/extractors/grounding.py` (new) — `check_grounding` pure function; span-token containment check, both sides normalized (`$`/comma/whitespace/case)
+- `src/medical/eob/extractors/llm.py` — New grounded system prompt; `_parse_grounded_field` + `_unwrap_envelope` normalization boundary; `extract` returns `tuple[EOBDocument, GroundingReport]`; `_parse_eob_json`/builders unchanged
+- `src/medical/eob/validate.py` — Keyword-only `grounding_report: GroundingReport | None = None` param; ungrounded fields appended to `issues` (same `_ISSUE_PENALTY` as arithmetic mismatches)
+- `src/medical/eob/pipeline.py` — `LLM_EXTRACTOR` typed as concrete `LLMVisionExtractor`; tuple unpacked; report forwarded to `validate`
+- `tests/test_eob_llm.py` — 6 new test scenarios: absent field, grounded on-page, wrong-page flag, confidence penalty, empty-words, found=false skipped
+
+#### How to verify manually
+```bash
+pytest tests/test_eob_llm.py -x -q  # 6 new grounding tests + existing LLM tests
+pytest tests/ -x -q                  # full suite: 322 passed
+```
+To trace the grounding path end-to-end: run `process_eob(doc, llm_override=True)` with a `Document` whose `words` list does not contain a value the LLM would extract; inspect `Extracted.validation.issues` for `"ungrounded field: ..."` entries and `Extracted.validation.confidence` for the penalty.
+
+#### Open questions / deferred decisions
+- **Multi-token name fields** (e.g. `subscriber: "JANE A DOE"`): the grounding check tokenizes on whitespace and requires all tokens present anywhere on the page. Middle initials or punctuation mismatches (`"A."` vs `"A"`) may produce false-positive ungrounded flags on name fields. Accepted as a known limitation; if it causes noise in practice, a "any-token-present" threshold or looser matching can be added.
+- **`received_date` behavior change**: previously the LLM could return Python `None` for a missing date; now `_unwrap_envelope` coerces absent fields to `""`. Downstream code that distinguishes `None` from `""` on `Claim.received_date` should be audited before Workstream B adds eval expectations for that field.
+- **`_MAX_TOKENS = 4000`** may be tight for multi-claim documents with the new envelope shape (each leaf adds ~60 bytes). Bump to 6000 if truncation appears in fixture testing.
 
 ## Workstream B — Per-failure-mode eval harness
 *Touchpoint: the per-phase tests + the runbook's insurer-cutover gate. "Measure the process, not the model": aggregate accuracy lies; report per (insurer × kind × subtype × column). A standalone harness writes a results table you group by.*

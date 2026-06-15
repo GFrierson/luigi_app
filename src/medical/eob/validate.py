@@ -16,6 +16,7 @@ import logging
 
 from src.medical.eob.types import (
     EOBDocument,
+    GroundingReport,
     PdfKind,
     ValidationResult,
 )
@@ -64,7 +65,12 @@ def _parse_amount(s: str) -> float | None:
         return None
 
 
-def validate(eob: EOBDocument, source: PdfKind) -> ValidationResult:
+def validate(
+    eob: EOBDocument,
+    source: PdfKind,
+    *,
+    grounding_report: GroundingReport | None = None,
+) -> ValidationResult:
     """
     Validate a parsed ``EOBDocument`` and return a ``ValidationResult``.
 
@@ -114,6 +120,10 @@ def validate(eob: EOBDocument, source: PdfKind) -> ValidationResult:
                     f"(allowed {allowed_sum:.2f} != paid {paid_sum:.2f} + "
                     f"owes {effective_owes:.2f})"
                 )
+
+        if grounding_report is not None:
+            for field_name in grounding_report.ungrounded:
+                issues.append(f"ungrounded field: {field_name}")
 
         confidence = 1.0 - _ISSUE_PENALTY * len(issues)
         confidence = max(0.0, confidence)

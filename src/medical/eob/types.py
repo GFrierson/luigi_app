@@ -87,6 +87,21 @@ class ValidationResult:
 
 
 @dataclass(frozen=True)
+class GroundedField:
+    field: str          # dotted path e.g. "issuer", "claims[0].anthem_paid"
+    value: str | None   # None when found=False
+    page: int | None    # 0-based, matches Word.page; None when found=False
+    span: str | None    # verbatim token(s) from the page image; None when found=False
+    found: bool
+
+
+@dataclass(frozen=True)
+class GroundingReport:
+    fields: list[GroundedField]   # all extracted fields with provenance
+    ungrounded: list[str]         # field paths that failed the post-check
+
+
+@dataclass(frozen=True)
 class Extracted:
     eob: EOBDocument
     validation: ValidationResult
@@ -110,3 +125,9 @@ class Extractor(Protocol):
     """AnthemExtractor + LLM both satisfy this."""
 
     def extract(self, doc: Document) -> EOBDocument: ...
+
+
+class GroundedExtractor(Protocol):
+    """LLMVisionExtractor — returns EOBDocument plus provenance report."""
+
+    def extract(self, doc: Document) -> tuple[EOBDocument, GroundingReport]: ...

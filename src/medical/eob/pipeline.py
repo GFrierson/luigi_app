@@ -37,8 +37,10 @@ REGISTRY: dict[str, Extractor] = {
 
 
 # Fallback extractor for documents with no recognized issuer, used only when
-# the caller opts in via process_eob(..., llm_override=True).
-LLM_EXTRACTOR: Extractor = LLMVisionExtractor()
+# the caller opts in via process_eob(..., llm_override=True). Typed as the
+# concrete class because the LLM path returns a (EOBDocument, GroundingReport)
+# tuple, unlike the deterministic Extractor Protocol.
+LLM_EXTRACTOR: LLMVisionExtractor = LLMVisionExtractor()
 
 
 def process_eob(doc: Document, *, llm_override: bool = False) -> EOBResult:
@@ -56,6 +58,7 @@ def process_eob(doc: Document, *, llm_override: bool = False) -> EOBResult:
         eob = REGISTRY[issuer].extract(doc)
         return Extracted(eob, validate(eob, doc.source), extractor=issuer)
     if llm_override:
-        eob = LLM_EXTRACTOR.extract(doc)
-        return Extracted(eob, validate(eob, doc.source), extractor="llm")
+        eob, grounding_report = LLM_EXTRACTOR.extract(doc)
+        result = validate(eob, doc.source, grounding_report=grounding_report)
+        return Extracted(eob, result, extractor="llm")
     return UnknownType(doc)
