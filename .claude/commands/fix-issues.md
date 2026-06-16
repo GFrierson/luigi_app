@@ -1,34 +1,21 @@
 ---
-description: Fixer loop — claims pending issues from the ledger, routes them to specialist agents, validates with tests, and updates issue status. Run standalone or with /loop.
-argument-hint: "[--max-issues N] [--section SECTION] [--dry-run]"
+description: Fixer — runs approved ledger tickets through per-section worktree agents, validates with pytest and adversarial review, then commits passing sections to the branch.
+argument-hint: "[--dry-run]"
 ---
 
-# Fix Issues — Fixer Loop
+# Fix Issues
 
-Process pending issues from the ledger. Claims issues at startup, routes to the right agent per section simultaneously, then validates with pytest and reviewer agents.
-
-1. Load ledger, recover stale in-progress entries
-2. Identify blocked sections (another fixer run is active)
-3. Claim a batch of pending issues — write before any fix work
-4. Route each section's issues to the right agent
-5. Launch all section agents in parallel
-6. Validate each section as its agent completes: pytest + reviewer agents
-7. Update ledger with final status
-8. Report
+Process `approved` tickets from the ledger. Each section is fixed in an isolated worktree (bad sections can't break each other's pytest), then verified, then committed serially to the real branch.
 
 **Ledger location:** `scratch/code-review-loop/ledger.json`
-**Pair with:** `/code-review-loop` to populate the ledger with new issues
+**Pair with:** `/code-review-loop` (to populate the ledger) → `/review-ledger` (human gate) → here
 
 ---
 
-## Step 0: Parse Arguments and Generate Run ID
+## Step 0: Parse Arguments
 
 Check `$ARGUMENTS` for:
-- `--max-issues N` — cap total issues to claim this run (default: 10)
-- `--section SECTION` — only process issues in this section (e.g. `--section src`)
-- `--dry-run` → show what would be claimed and fixed, but make no changes
-
-Generate a run ID: `fixer-<unix-timestamp-seconds>` (e.g. `fixer-1746400000`). Used as `claimedBy` and in commit messages.
+- `--dry-run` → load and report what would be fixed, but do not run the workflow or modify anything.
 
 ---
 
@@ -40,224 +27,99 @@ git log --oneline -3
 git status --short
 ```
 
-If there are uncommitted changes, **stop and emit `ANOTHER_SESSION_ACTIVE`** — do not auto-commit them. Ask the user to commit or stash their work first, then restart.
-
-Record the current HEAD SHA as the baseline.
+If there are uncommitted changes, **stop** — do not auto-commit them. Ask the user to commit or stash first.
 
 ---
 
-## Step 2: Load Ledger and Recover Stale Entries
+## Step 2: Load Ledger and Select Tickets
 
 ```bash
 cat scratch/code-review-loop/ledger.json 2>/dev/null || echo "[]"
 ```
 
-**Stale detection:** For every entry where `status === "in-progress"`:
-- If `claimedAt` is more than 30 minutes ago, reset it:
-  - `status` → `"pending"`
-  - `claimedAt` → `null`
-  - `claimedBy` → `null`
-  - `iterationNote` → `"reset from stale in-progress by <runId> at <now>"`
+Select tickets where `status === 'proposed'`. The human gate in `/review-ledger` marks unwanted tickets as `skip`; everything still `proposed` is implicitly approved for fixing.
 
-If any entries were reset, write the updated ledger back now, before continuing.
+If 0 candidates: output `"No proposed tickets to fix."` and stop.
 
-Report: `"X stale in-progress entries reset to pending."`
+Report: `"N proposed tickets across sections: [list]."`
+
+If `--dry-run`: print the selected tickets and stop.
 
 ---
 
-## Step 3: Select and Claim Issues
+## Step 3: Run the Fix Workflow
 
-### 3a. Identify blocked sections
+**Call the Workflow tool** with script path `.claude/workflows/fix-issues.js`, passing the approved tickets as `args` (the full array of ticket objects).
 
-Collect all sections where any entry has `status === "in-progress"`. These are blocked — another fixer owns them.
+The workflow:
+1. Groups tickets by `section`
+2. Runs `pipeline(sections, fix, validate, verify)` — each section isolated in a worktree
+3. Commits all passing sections serially to the real branch
 
-Report: `"Blocked sections (active fixer run): [list]"` or `"No blocked sections."`
-
-### 3b. Filter candidates
-
-From the ledger, select entries where:
-- `status === "pending"`
-- `section` is NOT in the blocked list
-- If `--section` was passed: only that section
-
-Sort by severity: CRITICAL → HIGH → MEDIUM → LOW. Within the same severity: `bug` before `quick`.
-
-Apply `--max-issues` cap.
-
-If 0 candidates: output `"No pending issues available to claim."` and stop.
-
-### 3c. Claim immediately — write before any fix work
-
-Update all selected entries in the ledger:
-- `status` → `"in-progress"`
-- `claimedAt` → current ISO timestamp
-- `claimedBy` → `<runId>`
-
-Write the full ledger back now. This is the concurrency gate.
-
-Report: `"Claimed N issues across sections: [list]. Run ID: <runId>"`
-
-If `--dry-run`: print the claim plan and stop.
+Wait for the workflow to complete before proceeding. It returns:
+```json
+{
+  "results": [
+    {
+      "section": "src",
+      "status": "fixed",
+      "commitSha": "abc1234",
+      "reviewNote": null,
+      "note": null,
+      "fingerprints": ["src/database.py:40:logging"]
+    }
+  ]
+}
+```
 
 ---
 
-## Step 4: Route Issues to Agents
+## Step 4: Update Ledger
 
-Group claimed issues by section. For each section's issue set, determine the agent:
+Build a fingerprint → result map from the returned results. For each ledger ticket whose `fingerprint` appears in the results:
 
-| Condition | Agent |
+| Workflow result status | Ledger update |
 |---|---|
-| File is in `tests/` or ends in `_test.py` | `@test-writer` |
-| `complexity === "bug"` OR severity is CRITICAL/HIGH | `general-purpose` |
-| `complexity === "quick"` | `general-purpose` |
+| `fixed` | `status → "fixed"`, `commitSha → <sha>`, `fixedAt → <ISO now>`, `reviewNote → <note if any>` |
+| `failed` | `status → "failed"`, `reviewNote → <note>` |
 
-Print routing plan:
-```
-Section: src
-  → general-purpose: 3 issues (2 bug, 1 quick)
-
-Section: tests
-  → test-writer: 2 issues (quick)
-```
+Write the updated ledger back.
 
 ---
 
-## Step 5: Launch Section Agents in Parallel
-
-Launch one agent per section simultaneously. Different sections don't share files, so parallel execution is safe.
-
-### Agent prompts by type
-
-**`general-purpose`:**
-> "Fix the following Python code issues. Fix ALL of them.
->
-> Issues:
-> [For each: file, line, description, why, fix suggestion]
->
-> Rules:
-> - Fix ONLY the listed issues. Do not refactor or reorganize anything else.
-> - Read each file fully before editing.
-> - Use parameterized SQL queries (`?` placeholders), never string interpolation.
-> - Use `logger.*` not `print()` for logging; always pass `exc_info=True` when logging caught exceptions.
-> - Always close SQLite connections.
-> - Wrap sync DB calls in `asyncio.to_thread()` inside async functions.
-> - After all edits, output: FIXES_APPLIED"
-
-**`@test-writer`:**
-> "Fix the following test issues. Fix ALL of them.
->
-> Issues:
-> [For each: file, line, description, why, fix suggestion]
->
-> Rules:
-> - Fix ONLY these issues.
-> - Read each file fully before editing.
-> - After all edits, output: FIXES_APPLIED"
-
----
-
-## Step 6: Validate Each Section as It Completes
-
-As each section's agent finishes, validate immediately — do not wait for all agents.
-
-### 6a. Run pytest
-
-```bash
-pytest tests/ -x -q 2>&1 | tail -30
-```
-
-If pytest **fails**:
-- Identify which files this section's agent changed: `git diff --name-only HEAD`
-- Revert only those files: `git checkout -- <files>`
-- Mark all issues in this section's batch as `status: "failed"`, `iterationNote: "pytest failed: <first error line>"`
-- Write ledger update
-- Continue — other sections' validations proceed normally
-
-If pytest **passes**, continue to 6b.
-
-### 6b. Reviewer Agents (parallel)
-
-Record exactly which files this section's agent changed:
-```bash
-git diff --name-only HEAD
-```
-
-Capture the diff using only those paths:
-```bash
-git diff HEAD -- <section-changed-files>
-```
-
-Spawn **two reviewer agents in parallel**:
-
-**@rules-reviewer:**
-> "Review this diff for any remaining convention violations or new problems introduced by the fix. Files changed: [list]. Output `LGTM` if the fix looks correct, or one issue per line using format: `[CONCERN] description — file:line`."
->
-> ```
-> [diff output]
-> ```
-
-**@bug-hunter:**
-> "Review this diff for any bugs, regressions, or new logic errors introduced by the fix. Files changed: [list]. Output `LGTM` if the fix looks correct, or one issue per line using format: `[CONCERN] description — file:line | REVERT: reason` if the fix introduced a new problem that should be reverted."
->
-> ```
-> [diff output]
-> ```
-
-Evaluate combined reviewer output:
-
-- Both output `LGTM` → **commit only the section's files**, mark issues `status: "completed"`:
-  ```bash
-  git add -- <section-changed-files>
-  git commit -m "fix(<section>): [description] — fix-issues <runId>"
-  ```
-- One or both flag concerns but no `REVERT` → **commit only the section's files**, mark issues `status: "needs-review"`, set `reviewNote` to concerns
-- Either reviewer outputs `REVERT: [reason]` → **revert this section's files**, mark issues `status: "failed"`
-
-Write ledger update after each section's verdict.
-
----
-
-## Step 7: Report
+## Step 5: Report
 
 ```
 ## Fix Issues — Run Complete
 
-Run ID:       <runId>
-Timestamp:    <ISO>
-Branch:       <branch>
-Baseline SHA: <sha before fixes>
-End SHA:      <sha after fixes>
+Timestamp:  <ISO>
+Branch:     <branch>
 
 ### This Run
-- Issues claimed:              N
-- Completed:                   K
-- Needs review:                J
-- Failed (pytest):             F
-- Failed (reviewer revert):    R
+- Tickets processed:   N
+- Fixed:               K
+- Failed:              F
 
-### Completed
-[For each: severity | section | agent used | description | file:line | commit SHA]
-
-### Needs Review
-[For each: severity | section | description | file:line | concern]
+### Fixed
+[For each: severity | section | file:line | description | commit SHA]
 
 ### Failed
-[For each: severity | section | description | file:line | reason]
+[For each: severity | section | file:line | description | reason]
 
 ### Ledger Totals
-- Pending:      X
-- In-progress:  Y (other active runs)
-- Completed:    Z
-- Needs review: W
-- Failed:       V
+- Proposed:  X
+- Approved:  Y
+- Fixed:     Z
+- Failed:    W
+- Skipped:   V
 ```
 
 ---
 
-## Step 8: Signal for /loop
+## Step 6: Signal
 
-Output one of these signals on its own line:
+Output one of these on its own line:
 
-- `ALL_ISSUES_RESOLVED` — no pending issues remain in the ledger
-- `RUN_COMPLETE_NEEDS_ATTENTION` — some issues landed in `needs-review` or `failed`; human review recommended
-- `RUN_COMPLETE_CONTINUE` — fixes applied and pending issues remain; safe to run again
+- `ALL_ISSUES_RESOLVED` — no proposed or approved tickets remain
+- `RUN_COMPLETE_NEEDS_ATTENTION` — some tickets landed in `failed`; human review needed
+- `RUN_COMPLETE_CONTINUE` — fixes applied and proposed tickets still remain; run `/code-review-loop` again or adjust with `/review-ledger`

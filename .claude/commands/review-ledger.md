@@ -1,10 +1,10 @@
 ---
-description: Review of what the code-review-loop fixed — plain-language explanations of every change.
+description: Review of what the code-review workflow found and fixed — plain-language explanations of every change, plus the human gate to skip/approve proposed tickets before running /fix-issues.
 ---
 
 # Ledger Review
 
-Read the ledger and explain every fix in plain English: what was wrong, why it mattered, what was changed, and what to check if something looks off.
+Read the ledger, explain every outcome in plain English, and give you a chance to **skip or adjust `proposed` tickets** before `/fix-issues` runs. This is the human gate between the review and fix workflows.
 
 ## Step 1: Load the Ledger
 
@@ -20,41 +20,41 @@ If the ledger is empty or missing, say so and stop.
 git log --oneline -30
 ```
 
-This gives you commit SHAs to cross-reference against ledger entries.
+Cross-reference commit SHAs against ledger entries.
 
 ## Step 3: Produce the Report
-
-Output the following report. Write every explanation as if talking to the developer who wrote the code — no jargon, no bullet soup, just clear sentences.
 
 ---
 
 ### Header
 
 ```
-Code Review Loop — Report
-Branch: <branch>
+Code Review Ledger — Report
+Branch:    <branch>
 Generated: <current date/time>
 
-Fixed:   N issues
-Failed:  M issues (needs your attention)
-Skipped: K issues (already handled in a prior run)
+Fixed:    N issues
+Failed:   M issues (needs your attention)
+Proposed: K tickets awaiting your review
+Skipped:  J tickets (you marked these skip)
 ```
 
 ---
 
 ### Section 1: What Got Fixed
 
-For each ledger entry with `status: "fixed"`, write a block like this:
+For each ledger entry with `status: "fixed"`, write a block:
 
 ```
 ── Fix #N ────────────────────────────────────────
 Severity:  HIGH / MEDIUM / LOW
 Category:  logging / bug / sql-injection / etc.
+File:      src/database.py:42
 Commit:    abc1234  (run `git show abc1234` to see the exact diff)
 
 What was wrong:
-  <2-3 sentences in plain English. Not "violation of rule X" — explain what
-  the code was actually doing wrong and why that's a problem in practice.>
+  <2-3 sentences in plain English — not "violation of rule X" but what the
+  code was actually doing wrong and why that's a problem in practice.>
 
 What the fix did:
   <1-2 sentences. What specifically changed.>
@@ -80,47 +80,30 @@ For each ledger entry with `status: "failed"`, write:
 ── Failed Fix #N ─────────────────────────────────
 Severity:  <severity>
 File:      <file>:<line>
-Commit:    none — changes were reverted
+Commit:    none — changes were reverted or never committed
 
 What was attempted:
   <plain English description of the issue that was tried>
 
 Why it failed:
-  Tests failed after the fix was applied — the attempted fix broke something.
-  The change was automatically reverted, so your codebase is unchanged for this item.
+  <the reason from reviewNote or note field>
 
 What to do:
-  This one needs a fresh look. Run `/code-review-loop --dry-run` to see it
-  in the triage plan, then fix it manually or start a new session focused
-  on just this issue.
+  Fix this manually or start a targeted new session for just this issue.
+  Re-run /code-review-loop to re-detect it if needed.
 ```
-
-If there are no failures, say: "Nothing failed — the loop either fixed it or skipped it."
 
 ---
 
-### Section 3: What Was Skipped
+### Section 3: Anything to Watch Out For
 
-Keep this section brief. For each `status: "skipped"` entry, just list:
-
-```
-- [MEDIUM] Description — file:line  (was over the per-iteration fix cap; will be picked up next run)
-```
-
-If there are no skipped items, omit this section.
-
----
-
-### Section 4: Anything to Watch Out For
-
-After writing the three sections, call out any fixed items that deserve extra scrutiny:
-
+Call out any fixed items that deserve extra scrutiny:
 - Fixes to files that also have uncommitted changes
 - Multiple fixes to the same file (higher chance of interaction)
 - Any CRITICAL-severity fix (always worth a manual read)
 - Fixes whose commit SHAs don't appear in recent `git log`
 
-If nothing warrants extra attention, say: "No items flagged for extra review."
+If nothing warrants extra attention: "No items flagged for extra review."
 
 ---
 
@@ -135,70 +118,62 @@ To dig into a specific fix:
 
 ---
 
-## Step 4: Pending Issues — What To Do Next
+## Step 4: Human Gate — Review Proposed Tickets
 
-After printing the report, scan the ledger for entries with `status: "pending"`.
+**This is the gate between `/code-review-loop` and `/fix-issues`.**
 
-If there are no pending issues, skip this section entirely.
+Scan the ledger for entries with `status: "proposed"`. If there are none, skip this section.
 
-If pending issues exist, count them and assess their complexity:
-- **Total count**: how many pending entries
-- **Severity mix**: how many are CRITICAL, HIGH, MEDIUM, LOW
-- **Category breadth**: how many distinct categories/files are touched
-
-**Recommendation logic:**
-
-| Condition | Recommendation |
-|-----------|----------------|
-| ≤3 pending, all LOW/MEDIUM, same file/category | Spawn agents now — straightforward, low blast radius |
-| 4–8 pending, mixed severity, multiple files | Write a handoff — context needed, safer to prep and hand off |
-| >8 pending OR any CRITICAL | Write a handoff — too much to safely auto-fix in one shot |
-
-Output:
+If proposed tickets exist, list them:
 
 ```
-── Pending Issues ────────────────────────────────
-Count:       N pending
-Complexity:  <brief characterization>
+── Proposed Tickets — Your Review Needed ─────────
 
-Recommendation: <spawn agents | write a handoff>
-Reason: <one sentence explaining why>
+  #1  [HIGH]   src/database.py:42   logging   Missing exc_info=True on exception log
+  #2  [MEDIUM] src/agent.py:88      bug       Off-by-one in retry count
+  #3  [LOW]    tests/test_db.py:15  naming    Variable named 'temp' — too generic
+  ...
+
+Total: N proposed ticket(s)
 ```
 
-Then ask the user:
-> "Want me to **[recommended action]**, or would you prefer **[the other option]**?"
+Then ask:
 
-- If they say **spawn agents**: invoke `/fix-issues` and let it run.
-- If they say **write a handoff**: produce a markdown handoff block they can paste into a new session.
-- If they say something else, ask a clarifying follow-up.
+> "Which of these (if any) do you want to **skip**? List ticket numbers (e.g. `1, 3`) or say `none` to approve all. Everything not skipped will be treated as approved and passed to `/fix-issues`."
 
-**Handoff format:**
+Wait for the user's response.
 
-```
-## Handoff — Pending Ledger Issues
-Branch: <branch>
-Date:   <today>
+- For each skipped ticket number: set `status → "skip"` in the ledger and write it back.
+- Everything remaining as `proposed` is implicitly `approved` — `/fix-issues` will pick it up.
 
-These issues are in `scratch/code-review-loop/ledger.json` with status "pending".
-Run `/fix-issues` in a fresh session to pick them up, or address manually:
+Confirm: `"Marked N ticket(s) as skip. K ticket(s) remain as proposed (approved for fixing)."`
 
-<for each pending issue>
-- [SEVERITY] <description> — <file>:<line>  (category: <category>)
-</for each>
-
-Context: <1–2 sentences about anything the fixer should know>
-```
+If the user skips all tickets: `"All proposed tickets skipped — nothing to fix."` and stop.
 
 ---
 
-## Step 5: Completion
+## Step 5: Pending Next Steps
 
-When pending issues and decision issues are both resolved (or there were none), end with:
+After the gate, suggest the next action:
+
+```
+── What's Next ───────────────────────────────────
+
+K ticket(s) approved for fixing across sections: [section list]
+
+Run `/fix-issues` to process them.
+```
+
+If the user wants to adjust a ticket's description/fix before running (e.g., "change the fix for #2 to..."), apply the edit to the ledger entry's `fix` field and write it back before they proceed.
+
+---
+
+## Step 6: Completion
 
 ```
 ── Review Complete ───────────────────────────────
-All ledger items reviewed.
-Pending: handled (spawning agents | handoff written | none)
-
-You're done. The branch is clean.
+Fixed:    N
+Failed:   M
+Skipped:  J
+Approved: K (ready for /fix-issues)
 ```
