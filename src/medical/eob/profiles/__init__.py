@@ -114,7 +114,9 @@ def _pair_claims(
     return pairs
 
 
-def _assemble_claim(banner_data: dict, table_rows: list[dict]) -> Claim:
+def _assemble_claim(
+    banner_data: dict, table_rows: list[dict], parsing_method: str = "none"
+) -> Claim:
     """Construct a ``Claim`` from parsed banner data and parsed table rows."""
     line_items: list[LineItem] = []
     for row in table_rows:
@@ -129,6 +131,7 @@ def _assemble_claim(banner_data: dict, table_rows: list[dict]) -> Claim:
         in_network=bool(banner_data.get("in_network", False)),
         patient_owes=str(banner_data.get("patient_owes", "")),
         line_items=line_items,
+        parsing_method=parsing_method,
     )
 
 
@@ -179,12 +182,15 @@ class ProfileExtractor:
                         self._run_extractor("claim_banner", banner_block) or {}
                     )
                 table_rows: list[dict] = []
+                table_parsing_method: str = "none"
                 if table_block is not None:
-                    table_rows = (
-                        self._run_extractor("claim_table", table_block) or []
-                    )
+                    raw = self._run_extractor("claim_table", table_block)
+                    if raw is not None:
+                        table_rows, table_parsing_method = raw
                 if banner_parsed or table_rows:
-                    claims.append(_assemble_claim(banner_parsed, table_rows))
+                    claims.append(
+                        _assemble_claim(banner_parsed, table_rows, table_parsing_method)
+                    )
 
             return EOBDocument(
                 issuer=self._profile.issuer,

@@ -107,16 +107,19 @@ def _extract_claim_banner(block: Block, profile: IssuerProfile) -> dict:
         return {}
 
 
-def _extract_claim_table(block: Block, profile: IssuerProfile) -> list[dict]:
-    """Parse a claim_table block into a list of line-item row dicts."""
+def _extract_claim_table(
+    block: Block, profile: IssuerProfile
+) -> tuple[list[dict], str]:
+    """Parse a claim_table block; return (rows, parsing_method)."""
     try:
         spec = profile.column_specs.get("claim_table")
         if spec is None:
-            return []
-        return parse_table(block, spec)
+            return [], "none"
+        result = parse_table(block, spec)
+        return result.rows, result.parsing_method
     except Exception:
         logger.error("_extract_claim_table: unexpected failure", exc_info=True)
-        return []
+        return [], "none"
 
 
 def _extract_header(block: Block, profile: IssuerProfile) -> dict:

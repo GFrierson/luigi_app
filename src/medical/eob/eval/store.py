@@ -33,6 +33,7 @@ _INSERT_COLUMNS = (
     "actual",
     "outcome",
     "confidence",
+    "parsing_method",
 )
 
 
@@ -48,22 +49,29 @@ def init_eval_db(db_path: str) -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS eval_results (
-                run_id     TEXT NOT NULL,
-                fixture    TEXT NOT NULL,
-                insurer    TEXT,
-                kind       TEXT,
-                subtype    TEXT,
-                block_type TEXT,
-                field      TEXT,
-                extractor  TEXT,
-                expected   TEXT,
-                actual     TEXT,
-                outcome    TEXT,
-                confidence REAL,
-                ts         DATETIME DEFAULT CURRENT_TIMESTAMP
+                run_id         TEXT NOT NULL,
+                fixture        TEXT NOT NULL,
+                insurer        TEXT,
+                kind           TEXT,
+                subtype        TEXT,
+                block_type     TEXT,
+                field          TEXT,
+                extractor      TEXT,
+                expected       TEXT,
+                actual         TEXT,
+                outcome        TEXT,
+                confidence     REAL,
+                parsing_method TEXT,
+                ts             DATETIME DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        try:
+            conn.execute(
+                "ALTER TABLE eval_results ADD COLUMN parsing_method TEXT"
+            )
+        except Exception:
+            pass  # column already exists on existing DBs
         conn.commit()
     except Exception:
         logger.error(f"init_eval_db: failed to init {db_path}", exc_info=True)

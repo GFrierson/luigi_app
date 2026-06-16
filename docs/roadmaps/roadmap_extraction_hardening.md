@@ -135,13 +135,43 @@ python -m src.medical.eob.eval.cli \
 
 **Done when:** `parse_table` runs cheap-first, self-diagnoses bad parses, escalates only those tables to a local second engine, records the parsing method per table, and the narrow/magenta columns the cheap pass drops now resolve.
 
-- [ ] Define table representation levels for claim tables: L0 raw bucketed rows → L1 typed/named columns via `ColumnSpec`; keep most tables at the simplest level that works
-- [ ] Add a per-table **parse diagnostic**: do row values reconcile (arithmetic), are all expected columns populated, did the narrow right-side + magenta `your_total` columns resolve? → a quality score per table
-- [ ] Add an **escalation hook** in `parse_table`: on diagnostic failure, re-parse that table/page only with a local second engine (PP-Structure table recognition / RapidOCR), keep the better result
-- [ ] Keep the second engine behind the existing `ColumnSpec` so the output shape is unchanged (mechanism stays; only cell recovery improves)
-- [ ] Record `parsing_method` per claim/table for provenance (extends `source`/`extractor`)
-- [ ] Feed parse-diagnostic failures into the eval harness (Workstream B) so escalation needs surface per insurer/column
-- [ ] Tests: the `EOB_denial` multi-page / narrow-column case (or a known-bad table) triggers escalation, the escalated result reconciles, and `parsing_method` is recorded
+- [x] Define table representation levels for claim tables: L0 raw bucketed rows → L1 typed/named columns via `ColumnSpec`; keep most tables at the simplest level that works
+- [x] Add a per-table **parse diagnostic**: do row values reconcile (arithmetic), are all expected columns populated, did the narrow right-side + magenta `your_total` columns resolve? → a quality score per table
+- [x] Add an **escalation hook** in `parse_table`: on diagnostic failure, re-parse that table/page only with a local second engine (PP-Structure table recognition / RapidOCR), keep the better result
+- [x] Keep the second engine behind the existing `ColumnSpec` so the output shape is unchanged (mechanism stays; only cell recovery improves)
+- [x] Record `parsing_method` per claim/table for provenance (extends `source`/`extractor`)
+- [x] Feed parse-diagnostic failures into the eval harness (Workstream B) so escalation needs surface per insurer/column
+- [x] Tests: the `EOB_denial` multi-page / narrow-column case (or a known-bad table) triggers escalation, the escalated result reconciles, and `parsing_method` is recorded
+
+### Handoff — Workstream C
+**Completed:** 2026-06-15
+**Branch:** main
+**Tests:** pytest tests/ -x -q → 347 passed (335 prior + 12 new)
+
+#### What was built
+`parse_table` now runs a coordinate-bucket pass (L0), scores it with `_compute_diagnostic` (empty `your_total` columns, missing columns, per-row arithmetic), and escalates to a pluggable `SecondEngine` when the score falls below 0.6. A `NoOpSecondEngine` stub is provided until PP-Structure/RapidOCR is benchmarked. `parsing_method` (`"coordinate_bucket"` | `"second_engine"` | `"none"`) is recorded on every `Claim` and flows through `diff.py` as metadata on every eval row, so `report.py` groupby can slice accuracy by escalation status without affecting the accuracy denominator.
+
+#### Files changed
+- `src/medical/eob/types.py` — Added `TableDiagnostic`, `TableParseResult` frozen dataclasses; added `parsing_method: str = field(default="none")` to `Claim`
+- `src/medical/eob/tables.py` — `SecondEngine` Protocol, `NoOpSecondEngine` stub, `_compute_diagnostic` pure function, `_try_parse_amount` helper; `parse_table` rewritten to return `TableParseResult` with diagnostic + escalation hook
+- `src/medical/eob/profiles/anthem.py` — `_extract_claim_table` now returns `tuple[list[dict], str]`
+- `src/medical/eob/profiles/__init__.py` — `_assemble_claim` accepts `parsing_method`; `ProfileExtractor.extract` unpacks the tuple and threads the method through
+- `src/medical/eob/eval/diff.py` — `_row` carries `parsing_method`; `_diff_claim` receives it from `act_claim.parsing_method`; `diff_eob` reads the method per claim
+- `src/medical/eob/eval/store.py` — `parsing_method TEXT` column added to schema with idempotent `ALTER TABLE` migration
+- `tests/test_eob_extraction.py` — Updated 4 existing `parse_table` tests to use `.rows`; added 12 new tests covering diagnostic scoring, escalation trigger/keep-primary, no-engine path, `Claim.parsing_method` default
+
+#### How to verify manually
+```bash
+pytest tests/test_eob_extraction.py -q   # 12 new Workstream C tests pass
+pytest tests/ -x -q                      # full suite: 347 passed
+```
+To trace the escalation path: construct a `Block` with words only in the left columns (leaving `your_total` empty), call `parse_table(block, spec, second_engine=NoOpSecondEngine())`, and inspect `result.diagnostic.escalate` (True) and `result.parsing_method` (stays `"coordinate_bucket"` since NoOp returns nothing better).
+
+#### Open questions / deferred decisions
+- **Second engine selection (open blocker):** PP-Structure vs RapidOCR must be benchmarked against the CAX11 RAM budget on the denial fixture before wiring. Plug in by implementing `SecondEngine.parse(block, spec) -> list[dict[str,str]]` and passing the instance to `parse_table`.
+- **Escalation threshold (0.6):** Set conservatively. Calibrate empirically once fixture PDFs exist.
+- **`ESCALATION_THRESHOLD` is module-level:** callers can override per-call via the `escalation_threshold` kwarg. Anthem's `_extract_claim_table` does not currently pass a second engine — the hook is ready but inactive until an engine is wired.
+- **`parsing_method` on banner-only claims:** claims assembled with no `claim_table` block carry `"none"` (the dataclass default), which is correct — they were never table-parsed.
 
 ---
 

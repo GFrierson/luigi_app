@@ -7,7 +7,7 @@ codebase — frozen dataclasses, ``Enum``, ``Protocol``, and the PEP 695
 the required style for this package; do not down-level it to pre-3.12 forms.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal, Protocol
 
@@ -64,6 +64,8 @@ class Claim:
     in_network: bool
     patient_owes: str
     line_items: list[LineItem]
+    # "none" when no claim_table was parsed; "coordinate_bucket" or "second_engine" otherwise.
+    parsing_method: str = field(default="none")
 
 
 EOBSubtype = Literal["summary", "denial", "payment_notice", "duplicate_notice"]
@@ -99,6 +101,26 @@ class GroundedField:
 class GroundingReport:
     fields: list[GroundedField]   # all extracted fields with provenance
     ungrounded: list[str]         # field paths that failed the post-check
+
+
+@dataclass(frozen=True)
+class TableDiagnostic:
+    """Per-table parse quality assessment produced by _compute_diagnostic."""
+
+    score: float                   # 0.0–1.0; higher is better
+    columns_missing: list[str]     # column names empty in every row
+    arithmetic_ok: bool            # per-row patient-cost-share totals reconcile
+    narrow_columns_resolved: bool  # your_total is non-empty in every row
+    escalate: bool                 # True when score < escalation_threshold
+
+
+@dataclass(frozen=True)
+class TableParseResult:
+    """Return type of parse_table — rows plus provenance metadata."""
+
+    rows: list[dict[str, str]]
+    parsing_method: str       # "coordinate_bucket" | "second_engine"
+    diagnostic: TableDiagnostic
 
 
 @dataclass(frozen=True)

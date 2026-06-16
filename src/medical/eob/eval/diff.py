@@ -86,6 +86,7 @@ def _row(
     actual_value: object,
     confidence: float,
     outcome: str,
+    parsing_method: str = "",
 ) -> dict:
     """Build one eval_results row dict (sans run_id/fixture/ts)."""
     return {
@@ -99,6 +100,7 @@ def _row(
         "actual": "" if actual_value is None else str(actual_value),
         "outcome": outcome,
         "confidence": confidence,
+        "parsing_method": parsing_method,
     }
 
 
@@ -143,10 +145,11 @@ def diff_eob(
             act_claim: Optional[Claim] = (
                 actual.claims[i] if i < len(actual.claims) else None
             )
+            claim_parsing_method = act_claim.parsing_method if act_claim else ""
             rows.extend(
                 _diff_claim(
                     i, exp_claim, act_claim, insurer, kind, subtype,
-                    extractor, confidence, ungrounded,
+                    extractor, confidence, ungrounded, claim_parsing_method,
                 )
             )
     except Exception:
@@ -167,6 +170,7 @@ def _diff_claim(
     extractor: str,
     confidence: float,
     ungrounded: list[str],
+    parsing_method: str = "",
 ) -> list[dict]:
     """Diff one expected claim (and its line items) against an actual claim."""
     rows: list[dict] = []
@@ -180,6 +184,7 @@ def _diff_claim(
             _row(
                 insurer, kind, subtype, _CLAIM_BANNER, path,
                 extractor, exp_val, act_val, confidence, outcome,
+                parsing_method,
             )
         )
 
@@ -198,6 +203,7 @@ def _diff_claim(
                 _row(
                     insurer, kind, subtype, _CLAIM_TABLE, path,
                     extractor, exp_val, act_val, confidence, outcome,
+                    parsing_method,
                 )
             )
 
