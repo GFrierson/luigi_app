@@ -282,6 +282,29 @@ print(result.validation)
 - **LLM branch**: `process_eob(doc, llm_override=True)` raises `NotImplementedError` — Phase 3 delivers this.
 - **`_extract_claim_banner` regex**: first-pass patterns; real Anthem formatting may require adjustment once tested against actual PDFs.
 
+#### Phase 2 — Real-PDF calibration update (2026-06-16)
+
+Running the real Anthem PDFs (`/Users/jgfrussell/Git/luigi-docs/EOBs/`) against the Phase 2 engine for the first time surfaced three root causes and one design bug. All were fixed in this session.
+
+**Root causes fixed:**
+1. **Column x-centers** — all 12 recalibrated to 300-DPI measurements from real OCR output. `your_total` moved from 2380 → 3140 (was colliding with `deductible`).
+2. **Segmentation** — phrase-based anchors/terminators were unreliable against multi-line OCR headers. The generic engine now supports optional `anchor_predicate` / `terminator_predicate` callables on `Signature` and `row_start_predicate` on `ColumnSpec` (all `None` by default; backward-compatible). `ANTHEM_PROFILE` uses `_is_data_row_start` (date token at x0 < 260) as the `claim_table` anchor, and `_is_totals` (leading "totals" word) as the table terminator.
+3. **Banner/header regexes** — replaced `_PATIENT_OWES_RE` with `_YOU_PAY_RE` ("You pay $…") + `_DEPOSITED_RE` ("Amount deposited…" → `patient_owes="0.00"`). Replaced label-based `_PATIENT_RE` with positional extraction from the y-band above "Claim Number:". Rewrote `_extract_header` to use the account-holder table row below the "holder" token; USPS mailing block (lone "S" sentinels) as fallback.
+4. **`=` prefix in OCR amounts** — `_try_parse_amount` (tables.py) and `_parse_amount` (validate.py) now strip `=` so OCR's `=984.00` format parses correctly.
+
+**Design bugs caught in review and fixed:**
+- `"received"` removed from `claim_banner.anchor_phrases` — it fired on "Received: 11/11/25" date labels inside check EOBs, prematurely truncating open `claim_table` blocks via the kind-switch logic.
+- `_is_totals` narrowed to check only `words[0]` (was scanning the full 5-word window, firing up to 4 words early and dropping the last row's cells).
+
+**Engine files changed:** `profiles/__init__.py`, `blocks.py`, `tables.py`, `validate.py`, `profiles/anthem.py`.
+
+**Tests:** 6 new synthetic-`Word` tests added → 363 total, 0 failed. Tests cover: predicate-based `claim_table` open/close, date-at-high-x0 rejection, `row_start_predicate` filtering, `reason_code` gap alignment, `=` stripping in both parsers, `_extract_header` account-holder strategy.
+
+**Eval gate status — next manual step:**
+- `experiments/medical/anthm_eob/annotations.csv` is a header-only scaffold. Fill ≥15 rows with verified real EOB paths (≥2 per subtype: check, standard, denial; scan for `duplicate_notice`) and run `python -m experiments.medical.anthm_eob.eval_anthm_eob`.
+- Real PDFs and their per-field expected JSONs contain PHI (real name/claim numbers) — **not committed**. Gate runs locally only; CI relies on the 363 synthetic unit tests for Anthem regression coverage.
+- Do NOT register in `run_all_extractor_evals.py` until the gate passes locally (it would pass vacuously in CI with n<15 and give false confidence).
+
 ## Phase 3: LLM vision fallback + consent
 **What's true when this is done:** an unknown-issuer EOB plus explicit user consent → `process_eob(doc, llm_override=True)` returns `Extracted` via the vision model with `extractor="llm"` and a populated `EOBDocument`; declining stops and logs; the unknown doc is flagged for a future profile. Consent is scoped to the EOB engine only — the existing bill/statement LLM path is unchanged.
 

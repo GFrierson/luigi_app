@@ -34,12 +34,22 @@ class Signature:
     kind: str
     anchor_phrases: list[str]
     terminator_phrases: list[str] = field(default_factory=list)
+    # Optional geometric predicate. Called with the sliding window's Word objects
+    # (list[Word]) when phrase matching alone is insufficient. Returns True to
+    # confirm the anchor match. None means phrase match only.
+    anchor_predicate: Callable[..., bool] | None = None
+    # Same contract for terminators: True means "close the current block here".
+    terminator_predicate: Callable[..., bool] | None = None
 
 
 @dataclass(frozen=True)
 class ColumnSpec:
     columns: dict[str, int]      # column_name -> x_center in normalized pixels
     row_terminator: list[str]    # phrases that end the table body
+    # Optional predicate applied to each clustered row's words (sorted left-to-right)
+    # before nearest-center bucketing. Rows where it returns False are dropped.
+    # None means no filtering.
+    row_start_predicate: Callable[..., bool] | None = None
 
 
 @dataclass

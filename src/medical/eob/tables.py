@@ -72,7 +72,7 @@ def _is_terminator(word: Word, terminators: list[str]) -> bool:
 
 def _try_parse_amount(s: str) -> float | None:
     """Parse a money string like '$1,234.56' into 1234.56; return None if unparseable."""
-    cleaned = (s or "").replace("$", "").replace(",", "").strip()
+    cleaned = (s or "").replace("$", "").replace(",", "").replace("=", "").strip()
     if not cleaned:
         return None
     try:
@@ -205,6 +205,15 @@ def parse_table(
                 break
             if not placed:
                 rows.append((word.page, word.y0, [word]))
+
+        # Drop rows whose leftmost word fails the row-start predicate (when set).
+        # This removes banner/footer/legal rows that bleed into the block.
+        if spec.row_start_predicate is not None:
+            rows = [
+                (page, anchor_y0, row_words)
+                for page, anchor_y0, row_words in rows
+                if spec.row_start_predicate(sorted(row_words, key=lambda w: w.x0))
+            ]
 
         primary_rows: list[dict[str, str]] = []
         for _page, _anchor_y0, row_words in rows:

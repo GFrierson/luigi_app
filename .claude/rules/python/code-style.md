@@ -23,14 +23,17 @@ description: "Python code style, logging, error handling, and structural convent
 - Always pass `exc_info=True` when logging caught exceptions so the traceback is preserved:
   ✅ `logger.error(f"Failed to handle message for chat {chat_id}", exc_info=True)`
   ❌ `logger.error(f"Failed: {e}")`
-- Never use `print()` in production code.
+- **No `print()` in `src/`.** Diagnostic and operational output goes through `logger.*` so it's leveled, greppable, and readable via `journalctl` when debugging the running service with no human present.
+  - *Exception:* a CLI or script whose **stdout is the intended deliverable** (a report the user reads or pipes). Use `sys.stdout.write()` (or `print()`) with a one-line comment marking it as deliverable output, not diagnostics. This rule targets diagnostic logging dressed up as `print()`, not a tool emitting its product.
 
 ## Error Handling
 
-- Catch exceptions at integration boundaries (Telegram handlers, LLM calls, scheduler jobs). Never swallow exceptions silently.
+- Catch exceptions at integration boundaries (Telegram handlers, LLM calls, scheduler jobs). 
+- **[INVARIANT]** Never swallow exceptions silently.
 - Pipeline helpers should never raise — return `None` or a default value on failure, and log the issue.
   ✅ `except Exception: logger.error(..., exc_info=True); return None`
   ❌ `except Exception: pass`
+  - The only sanctioned catch-and-continue is the idempotent-migration pattern in Database Patterns.
 - Reserve raising exceptions for true programming errors (wrong arguments, impossible state).
 
 ## Database Patterns
@@ -38,8 +41,18 @@ description: "Python code style, logging, error handling, and structural convent
 - Per-user SQLite: each user's data lives in `data/{chat_id}.db`. Use `get_user_db_path(database_dir, chat_id)` to resolve the path.
 - Always close connections: open a connection at the start of a DB function, commit, and close before returning.
 - Use `conn.row_factory = sqlite3.Row` so rows are dict-accessible.
-- Schema changes go through `init_db()` using `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN` inside a `try/except` for idempotent migrations.
-- Use parameterized queries (`?` placeholders). Never interpolate user input into SQL strings.
+- Schema changes go through `init_db()`. New tables use `CREATE TABLE IF NOT EXISTS`. New columns on existing tables use `ALTER TABLE ... ADD COLUMN`, catching only the duplicate-column case:
+```python
+  try:
+      conn.execute("ALTER TABLE messages ADD COLUMN parsing_method TEXT")
+  except sqlite3.OperationalError as e:
+      if "duplicate column" not in str(e).lower():
+          raise
+      logger.debug("Column parsing_method already present; skipping migration")
+```
+  - *Why both coexist:* `CREATE TABLE IF NOT EXISTS` provisions fresh DBs; the `ALTER` migrates DBs created **before** the column existed. The `ALTER` is **not** redundant with the column being listed in `CREATE TABLE` — deleting it breaks upgrades of pre-existing user DBs.
+  - This narrow catch-and-continue is the *only* sanctioned one; it does **not** license `except Exception: pass` (see Error Handling).
+- **[INVARIANT]** Use parameterized queries (`?` placeholders). Never interpolate user input into SQL strings.
 
 ## Async Conventions
 

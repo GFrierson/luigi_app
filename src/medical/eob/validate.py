@@ -56,7 +56,7 @@ def _parse_amount(s: str) -> float | None:
     """
     if s is None:
         return None
-    cleaned = s.replace("$", "").replace(",", "").strip()
+    cleaned = s.replace("$", "").replace(",", "").replace("=", "").strip()
     if cleaned == "" or cleaned.lower() in _NA_TOKENS:
         return None
     try:

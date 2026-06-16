@@ -504,3 +504,114 @@ def test_claim_parsing_method_default_is_none():
         line_items=[],
     )
     assert claim.parsing_method == "none"
+
+
+# --- New geometric predicate and Anthem profile tests ---
+
+from src.medical.eob.profiles.anthem import _extract_header  # noqa: E402
+from src.medical.eob.tables import _try_parse_amount  # noqa: E402
+
+
+def test_segment_opens_claim_table_on_date_row_and_closes_on_totals():
+    # A date at low x0 triggers _is_data_row_start (anchor_predicate) and opens
+    # a claim_table block. A "Totals" word fires _is_totals (terminator_predicate)
+    # and closes it. The Totals word and everything after must not be in the block.
+    words = [
+        _word("01/15/25", x0=65,  y0=100),
+        _word("office",   x0=340, y0=100),
+        _word("Totals",   x0=100, y0=200),
+        _word("extra",    x0=100, y0=300),
+    ]
+    doc = _make_doc("01/15/25 office Totals extra", words)
+
+    blocks = segment(doc, ANTHEM_PROFILE.signatures)
+
+    claim_tables = [b for b in blocks if b.kind == "claim_table"]
+    assert len(claim_tables) == 1
+    block_texts = {w.text for w in claim_tables[0].words}
+    assert "Totals" not in block_texts
+    assert "extra" not in block_texts
+
+
+def test_segment_does_not_open_claim_table_on_received_date_at_high_x0():
+    # A date at x0=1650 (>= _ROW_DATE_MAX_X0=260) must NOT trigger
+    # _is_data_row_start, so no claim_table block should open.
+    words = [
+        _word("Received",  x0=100,  y0=10),
+        _word("11/11/25",  x0=1650, y0=10),
+    ]
+    doc = _make_doc("Received 11/11/25", words)
+
+    blocks = segment(doc, ANTHEM_PROFILE.signatures)
+
+    assert not any(b.kind == "claim_table" for b in blocks)
+
+
+def test_parse_table_row_start_predicate_drops_non_date_rows():
+    # Rows whose leftmost word fails row_start_predicate are silently dropped.
+    spec = ColumnSpec(
+        columns={"a": 100, "b": 300},
+        row_terminator=[],
+        row_start_predicate=lambda words: words[0].text.startswith("2"),
+    )
+    block_words = [
+        _word("2/1/25",  x0=95,  y0=50),
+        _word("svc",     x0=295, y0=50),
+        _word("header",  x0=95,  y0=100),
+        _word("label",   x0=295, y0=100),
+        _word("2/2/25",  x0=95,  y0=150),
+        _word("svc2",    x0=295, y0=150),
+    ]
+    block = _make_block("claim_table", block_words)
+
+    result = parse_table(block, spec)
+
+    assert len(result.rows) == 2
+    assert result.rows[0]["a"] == "2/1/25"
+    assert result.rows[1]["a"] == "2/2/25"
+
+
+def test_parse_table_row_missing_reason_code_aligns_other_columns():
+    # When reason_code (center 678) has no word, its cell is "" while every other
+    # column in the ANTHEM_PROFILE claim_table spec gets a value.
+    spec = ANTHEM_PROFILE.column_specs["claim_table"]
+    words = [
+        _word(name[:4], x0=center - 5, y0=100)
+        for name, center in spec.columns.items()
+        if name != "reason_code"
+    ]
+    block = _make_block("claim_table", words)
+
+    result = parse_table(block, spec)
+
+    assert len(result.rows) == 1
+    assert result.rows[0]["reason_code"] == ""
+    other_cols = [n for n in spec.columns if n != "reason_code"]
+    assert all(result.rows[0][n] != "" for n in other_cols)
+
+
+def test_try_parse_amount_strips_leading_equals():
+    # _try_parse_amount must handle the "=984.00" format that appears in some
+    # Anthem check EOBs in addition to the standard "$N" form.
+    assert _try_parse_amount("=984.00") == 984.0
+    assert _try_parse_amount("=1,234.56") == 1234.56
+    assert _try_parse_amount("$500.00") == 500.0
+    assert _try_parse_amount("") is None
+    # _parse_amount in validate.py must handle the same format.
+    assert _parse_amount("=984.00") == 984.0
+
+
+def test_extract_header_returns_subscriber_from_account_holder_block():
+    # Strategy 1: words on the row directly below a "Holder" anchor are joined
+    # as the subscriber name. Digit-containing tokens ("ID12345") are excluded.
+    words = [
+        _word("Holder",   x0=50,  y0=20),
+        _word("James",    x0=50,  y0=40),
+        _word("Frierson", x0=150, y0=40),
+        _word("ID12345",  x0=50,  y0=60),
+    ]
+    block = _make_block("header", words)
+
+    result = _extract_header(block, ANTHEM_PROFILE)
+
+    assert result["subscriber"] == "James Frierson"

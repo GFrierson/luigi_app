@@ -16,7 +16,7 @@ Never raises: any failure returns ``[]`` and is logged with ``exc_info=True``.
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from src.medical.eob.types import Document, Word
 
@@ -61,6 +61,27 @@ def _match_phrase(window: str, phrases: list[str]) -> bool:
     return any(window.startswith(phrase) for phrase in phrases)
 
 
+def _match_anchor(
+    sig: "Signature", window: str, window_words: list[Word]
+) -> bool:
+    """True if the window matches the signature's anchor phrase OR its predicate."""
+    if _match_phrase(window, [p.lower() for p in sig.anchor_phrases]):
+        return True
+    return bool(sig.anchor_predicate is not None and sig.anchor_predicate(window_words))
+
+
+def _match_terminator(
+    window: str,
+    phrases: list[str],
+    predicate: "Callable[..., bool] | None",
+    window_words: list[Word],
+) -> bool:
+    """True if the window matches a terminator phrase OR the terminator predicate."""
+    if _match_phrase(window, phrases):
+        return True
+    return bool(predicate is not None and predicate(window_words))
+
+
 def _make_block(kind: str, words: list[Word]) -> Block:
     """Build a Block, computing its inclusive page_span from its words."""
     pages = [w.page for w in words]
@@ -78,6 +99,11 @@ def segment(doc: Document, signatures: "list[Signature]") -> list[Block]:
     phrases is detected. Multiple blocks of the same kind are expected (e.g.
     one ``claim_banner`` per claim).
 
+    Signatures may also supply an ``anchor_predicate`` and/or
+    ``terminator_predicate`` (callables receiving the window's Word objects)
+    that are OR-ed with the phrase match, enabling geometry-based detection
+    when phrase matching alone is insufficient.
+
     Never raises — returns ``[]`` on any error.
     """
     try:
@@ -89,22 +115,29 @@ def segment(doc: Document, signatures: "list[Signature]") -> list[Block]:
         current_kind: str | None = None
         current_words: list[Word] = []
         current_terminators: list[str] = []
+        current_terminator_predicate: Callable[..., bool] | None = None
 
         i = 0
         n = len(ordered)
         while i < n:
             window = _window_text(ordered, i, _WINDOW_SIZE)
+            window_words = ordered[i : i + _WINDOW_SIZE]
 
             # Does the window start a new signature region?
             matched_sig: "Signature | None" = None
             for sig in signatures:
-                if _match_phrase(window, [p.lower() for p in sig.anchor_phrases]):
+                if _match_anchor(sig, window, window_words):
                     matched_sig = sig
                     break
 
             # Terminate the current block before opening a different one.
             if current_kind is not None:
-                hit_terminator = _match_phrase(window, current_terminators)
+                hit_terminator = _match_terminator(
+                    window,
+                    current_terminators,
+                    current_terminator_predicate,
+                    window_words,
+                )
                 switching = matched_sig is not None and matched_sig.kind != current_kind
                 if hit_terminator or switching:
                     if current_words:
@@ -112,10 +145,12 @@ def segment(doc: Document, signatures: "list[Signature]") -> list[Block]:
                     current_kind = None
                     current_words = []
                     current_terminators = []
+                    current_terminator_predicate = None
 
             if matched_sig is not None and current_kind is None:
                 current_kind = matched_sig.kind
                 current_terminators = [p.lower() for p in matched_sig.terminator_phrases]
+                current_terminator_predicate = matched_sig.terminator_predicate
 
             if current_kind is not None:
                 current_words.append(ordered[i])
