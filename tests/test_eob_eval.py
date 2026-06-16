@@ -184,6 +184,198 @@ def test_diff_eob_claim_count_mismatch():
     assert first["outcome"] == "match"
 
 
+def test_diff_eob_duplicate_line_items_full_match():
+    """3 identical expected line items vs 3 identical actual → all match, zero miss/spurious."""
+    item = _line_item(service_date="2026-01-01", service="Office Visit", copay="$20.00")
+    claim = _claim(line_items=[item, item, item])
+    eob = _eob(claims=[claim])
+    rows = diff_eob("f", "anthem", "text", eob, eob, "anthem", 0.95, [])
+    line_item_rows = [r for r in rows if "line_items" in r["field"]]
+    assert line_item_rows  # items were diffed
+    assert all(r["outcome"] == "match" for r in line_item_rows), (
+        [r for r in line_item_rows if r["outcome"] != "match"]
+    )
+
+
+def test_diff_eob_duplicate_under_extraction():
+    """3 identical expected vs 2 actual → 2 match, 1 miss, 0 spurious."""
+    item = _line_item(service_date="2026-01-01", service="Office Visit", copay="$20.00")
+    exp_claim = _claim(line_items=[item, item, item])
+    act_claim = _claim(line_items=[item, item])
+    rows = diff_eob(
+        "f", "anthem", "text",
+        _eob(claims=[exp_claim]), _eob(claims=[act_claim]),
+        "anthem", 0.95, [],
+    )
+    li_rows = [r for r in rows if "line_items" in r["field"]]
+    assert any(r["outcome"] == "miss" for r in li_rows), "expected at least one miss"
+    assert not any(r["outcome"] == "spurious" for r in li_rows), "no spurious expected"
+
+
+def test_diff_eob_duplicate_over_extraction():
+    """2 identical expected vs 3 actual → 2 match, 1 spurious, 0 miss."""
+    item = _line_item(service_date="2026-01-01", service="Office Visit", copay="$20.00")
+    exp_claim = _claim(line_items=[item, item])
+    act_claim = _claim(line_items=[item, item, item])
+    rows = diff_eob(
+        "f", "anthem", "text",
+        _eob(claims=[exp_claim]), _eob(claims=[act_claim]),
+        "anthem", 0.95, [],
+    )
+    li_rows = [r for r in rows if "line_items" in r["field"]]
+    assert any(r["outcome"] == "spurious" for r in li_rows), "expected a spurious row"
+    assert not any(r["outcome"] == "miss" for r in li_rows), "no miss expected"
+
+
+def test_diff_eob_spurious_line_item():
+    """Expected 1 item, actual 2 where second shares zero monetary fields with expected.
+
+    Guards against the coincidental-zero-monetary case: a second actual item that
+    shares no identity fields must NOT qualify as a match candidate, even if both
+    have 0-valued monetary fields.
+    """
+    expected_item = _line_item(
+        service_date="2026-01-01", service="Office Visit", reason_code="N130",
+        copay="$20.00", deductible="$0.00",
+    )
+    # Second actual item: completely different identity, all zero monetary.
+    spurious_item = _line_item(
+        service_date="2026-02-15", service="Lab Work", reason_code="",
+        copay="$0.00", deductible="$0.00",
+    )
+    exp_claim = _claim(line_items=[expected_item])
+    act_claim = _claim(line_items=[expected_item, spurious_item])
+    rows = diff_eob(
+        "f", "anthem", "text",
+        _eob(claims=[exp_claim]), _eob(claims=[act_claim]),
+        "anthem", 0.95, [],
+    )
+    li_rows = [r for r in rows if "line_items" in r["field"]]
+    assert any(r["outcome"] == "spurious" for r in li_rows), "second item must be spurious"
+    assert not any(r["outcome"] == "miss" for r in li_rows), "matched item must not be miss"
+    # The matched expected item's fields should all be match.
+    matched = [r for r in li_rows if "spurious" not in r["field"] and r["outcome"] != "spurious"]
+    assert all(r["outcome"] == "match" for r in matched), matched
+
+
+def test_diff_eob_reordered_line_items():
+    """Expected [A, B] vs actual [B, A] (distinct) → all match, no miss, no spurious."""
+    item_a = _line_item(service_date="2026-01-01", service="Office Visit", reason_code="N130", copay="$20.00")
+    item_b = _line_item(service_date="2026-01-02", service="X-Ray", reason_code="N140", copay="$10.00")
+    exp_claim = _claim(line_items=[item_a, item_b])
+    act_claim = _claim(line_items=[item_b, item_a])
+    rows = diff_eob(
+        "f", "anthem", "text",
+        _eob(claims=[exp_claim]), _eob(claims=[act_claim]),
+        "anthem", 0.95, [],
+    )
+    li_rows = [r for r in rows if "line_items" in r["field"]]
+    assert li_rows
+    assert all(r["outcome"] == "match" for r in li_rows), (
+        [r for r in li_rows if r["outcome"] != "match"]
+    )
+
+
+def test_diff_eob_near_duplicate_monetary_tiebreak():
+    """Two same-identity items differing in one monetary field pair to their closest counterpart."""
+    # Both expected items share identity; they differ only in copay.
+    item_a = _line_item(service_date="2026-01-01", service="Office Visit", reason_code="N130", copay="$20.00")
+    item_b = _line_item(service_date="2026-01-01", service="Office Visit", reason_code="N130", copay="$30.00")
+    exp_claim = _claim(line_items=[item_a, item_b])
+    act_claim = _claim(line_items=[item_a, item_b])
+    rows = diff_eob(
+        "f", "anthem", "text",
+        _eob(claims=[exp_claim]), _eob(claims=[act_claim]),
+        "anthem", 0.95, [],
+    )
+    li_rows = [r for r in rows if "line_items" in r["field"]]
+    # All fields should match — no cross-pairing spurious mismatch.
+    assert all(r["outcome"] == "match" for r in li_rows), (
+        [r for r in li_rows if r["outcome"] != "match"]
+    )
+
+
+def test_diff_eob_spurious_claim():
+    """Expected 1 claim, actual 2 claims → second claim emits spurious rows, no miss."""
+    exp = _eob(claims=[_claim(claim_number="C001")])
+    act = _eob(claims=[_claim(claim_number="C001"), _claim(claim_number="C002")])
+    rows = diff_eob("f", "anthem", "text", exp, act, "anthem", 0.95, [])
+    spurious = [r for r in rows if "spurious" in r["field"]]
+    assert spurious, "extra actual claim must produce spurious rows"
+    assert all(r["outcome"] == "spurious" for r in spurious)
+    assert not any(r["outcome"] == "miss" for r in rows), "no miss expected"
+    # Original claim still matches.
+    first = next(r for r in rows if r["field"] == "claims[0].claim_number")
+    assert first["outcome"] == "match"
+
+
+def test_diff_eob_spurious_outcome_lowers_accuracy(tmp_path):
+    """Round-trip: spurious rows count as non-match in the accuracy helpers."""
+    from src.medical.eob.eval.report import accuracy_by_insurer_kind, load_results
+    from src.medical.eob.eval.store import init_eval_db, insert_eval_row
+    db = str(tmp_path / "eval.db")
+    init_eval_db(db)
+    # One match row + one spurious row for the same insurer/kind.
+    insert_eval_row(db, _row(run_id="R1", field="issuer", outcome="match", confidence=0.9))
+    insert_eval_row(db, _row(run_id="R1", field="claims[spurious:0].patient",
+                              outcome="spurious", expected="", actual="JANE DOE", confidence=0.9))
+    df = load_results(db, run_id="R1")
+    acc = accuracy_by_insurer_kind(df)
+    # Accuracy must be < 1.0 because the spurious row is non-match.
+    assert acc.iloc[0]["accuracy"] < 1.0
+
+
+def test_diff_eob_no_identity_shared_zeros():
+    """Guard: actual item sharing only zero-valued monetary fields must NOT qualify as a match.
+
+    E1 has identity (idX); A2 has identity (idY) but shares zero monetary values with E1.
+    Expected: exactly 1 match (E1↔first actual) + 1 spurious (A2), NOT a matched pair of E1+A2.
+    """
+    e1 = _line_item(service_date="2026-01-01", service="Office Visit", reason_code="N130",
+                    copay="$0.00", deductible="$0.00")
+    a2 = _line_item(service_date="2026-02-15", service="Lab Work", reason_code="N999",
+                    copay="$0.00", deductible="$0.00")
+    exp_claim = _claim(line_items=[e1])
+    act_claim = _claim(line_items=[e1, a2])
+    rows = diff_eob(
+        "f", "anthem", "text",
+        _eob(claims=[exp_claim]), _eob(claims=[act_claim]),
+        "anthem", 0.95, [],
+    )
+    li_rows = [r for r in rows if "line_items" in r["field"]]
+    assert any(r["outcome"] == "spurious" for r in li_rows), "A2 must be spurious"
+    assert not any(r["outcome"] == "miss" for r in li_rows), "E1 should match, no miss"
+
+
+def test_diff_eob_same_patient_under_and_over():
+    """Guard: patient identity must not pair a missed expected claim to a spurious actual one.
+
+    Expected claims: [#C001, #C002] — same patient.
+    Actual claims:   [#C001, #C009] — same patient, different second claim_number.
+    Expected: C001 match, C002 miss, C009 spurious. C002 must NOT be paired with C009.
+    """
+    c001_e = _claim(claim_number="C001")
+    c002_e = _claim(claim_number="C002")
+    c001_a = _claim(claim_number="C001")
+    c009_a = _claim(claim_number="C009")
+    exp = _eob(claims=[c001_e, c002_e])
+    act = _eob(claims=[c001_a, c009_a])
+    rows = diff_eob("f", "anthem", "text", exp, act, "anthem", 0.95, [])
+    # C002 (expected, no actual counterpart) → all miss.
+    c002_rows = [r for r in rows if r["field"].startswith("claims[1].")]
+    assert c002_rows, "C002 expected claim must be enumerated"
+    assert all(r["outcome"] == "miss" for r in c002_rows), (
+        [r for r in c002_rows if r["outcome"] != "miss"]
+    )
+    # C009 (actual, no expected counterpart) → all spurious.
+    spurious_rows = [r for r in rows if "spurious" in r["field"]]
+    assert spurious_rows, "C009 actual claim must produce spurious rows"
+    assert all(r["outcome"] == "spurious" for r in spurious_rows)
+    # C001 → match.
+    c001_num = next(r for r in rows if r["field"] == "claims[0].claim_number")
+    assert c001_num["outcome"] == "match"
+
+
 # ---------------------------------------------------------------------------
 # run_harness
 # ---------------------------------------------------------------------------
